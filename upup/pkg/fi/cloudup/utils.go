@@ -18,10 +18,12 @@ package cloudup
 
 import (
 	"fmt"
+	"github.com/golang/glog"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
+	"k8s.io/kubernetes/federation/pkg/dnsprovider"
 	"strings"
 )
 
@@ -64,24 +66,12 @@ func BuildCloud(cluster *api.Cluster) (fi.Cloud, error) {
 
 	case "aws":
 		{
-
-			nodeZones := make(map[string]bool)
-			for _, zone := range cluster.Spec.Zones {
-				if len(zone.Name) <= 2 {
-					return nil, fmt.Errorf("Invalid AWS zone: %q", zone.Name)
-				}
-
-				nodeZones[zone.Name] = true
-
-				zoneRegion := zone.Name[:len(zone.Name)-1]
-				if region != "" && zoneRegion != region {
-					return nil, fmt.Errorf("Clusters cannot span multiple regions (found zone %q, but region is %q)", zone.Name, region)
-				}
-
-				region = zoneRegion
+			region, err := awsup.FindRegion(cluster)
+			if err != nil {
+				return nil, err
 			}
 
-			err := awsup.ValidateRegion(region)
+			err = awsup.ValidateRegion(region)
 			if err != nil {
 				return nil, err
 			}
@@ -108,4 +98,64 @@ func BuildCloud(cluster *api.Cluster) (fi.Cloud, error) {
 		return nil, fmt.Errorf("unknown CloudProvider %q", cluster.Spec.CloudProvider)
 	}
 	return cloud, nil
+}
+
+func FindDNSHostedZone(dns dnsprovider.Interface, clusterDNSName string) (string, error) {
+	glog.V(2).Infof("Querying for all DNS zones to find match for %q", clusterDNSName)
+
+	clusterDNSName = "." + strings.TrimSuffix(clusterDNSName, ".")
+
+	zonesProvider, ok := dns.Zones()
+	if !ok {
+		return "", fmt.Errorf("dns provider %T does not support zones", dns)
+	}
+
+	allZones, err := zonesProvider.List()
+	if err != nil {
+		return "", fmt.Errorf("error querying zones: %v", err)
+	}
+	var zones []dnsprovider.Zone
+	for _, z := range allZones {
+		zoneName := "." + strings.TrimSuffix(z.Name(), ".")
+
+		if strings.HasSuffix(clusterDNSName, zoneName) {
+			zones = append(zones, z)
+		}
+	}
+
+	// Find the longest zones
+	maxLength := -1
+	maxLengthZones := []dnsprovider.Zone{}
+	for _, z := range zones {
+		zoneName := "." + strings.TrimSuffix(z.Name(), ".")
+
+		n := len(zoneName)
+		if n < maxLength {
+			continue
+		}
+
+		if n > maxLength {
+			maxLength = n
+			maxLengthZones = []dnsprovider.Zone{}
+		}
+
+		maxLengthZones = append(maxLengthZones, z)
+	}
+
+	if len(maxLengthZones) == 0 {
+		// We make this an error because you have to set up DNS delegation anyway
+		tokens := strings.Split(clusterDNSName, ".")
+		suffix := strings.Join(tokens[len(tokens)-2:], ".")
+		//glog.Warningf("No matching hosted zones found; will created %q", suffix)
+		//return suffix, nil
+		return "", fmt.Errorf("No matching hosted zones found for %q; please create one (e.g. %q) first", clusterDNSName, suffix)
+	}
+
+	if len(maxLengthZones) == 1 {
+		id := maxLengthZones[0].ID()
+		id = strings.TrimPrefix(id, "/hostedzone/")
+		return id, nil
+	}
+
+	return "", fmt.Errorf("Found multiple hosted zones matching cluster %q; please specify the ID of the zone to use", clusterDNSName)
 }

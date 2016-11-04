@@ -34,6 +34,7 @@ import (
 	"k8s.io/kops/util/pkg/vfs"
 	"k8s.io/kubernetes/federation/pkg/dnsprovider"
 	k8sapi "k8s.io/kubernetes/pkg/api"
+	"net"
 	"os"
 	"strings"
 )
@@ -185,15 +186,20 @@ func (c *ApplyClusterCmd) Run() error {
 		}
 
 		if usesCNI(cluster) {
-			defaultCNIAsset := fmt.Sprintf("https://storage.googleapis.com/kubernetes-release/network-plugins/cni-8a936732094c0941e1543ef5d292a1f4fffa1ac5.tar.gz")
+			// TODO: we really need to sort this out:
+			// https://github.com/kubernetes/kops/issues/724
+			// https://github.com/kubernetes/kops/issues/626
+			// https://github.com/kubernetes/kubernetes/issues/30338
+
+			// CNI version for 1.3
+			//defaultCNIAsset = "https://storage.googleapis.com/kubernetes-release/network-plugins/cni-8a936732094c0941e1543ef5d292a1f4fffa1ac5.tar.gz"
+			//hashString := "86966c78cc9265ee23f7892c5cad0ec7590cec93"
+
+			defaultCNIAsset := "https://storage.googleapis.com/kubernetes-release/network-plugins/cni-07a8a28637e97b22eb8dfe710eeae1344f69d16e.tar.gz"
+			hashString := "19d49f7b2b99cd2493d5ae0ace896c64e289ccbb"
+
 			glog.V(2).Infof("Adding default CNI asset: %s", defaultCNIAsset)
 
-			hashString := "86966c78cc9265ee23f7892c5cad0ec7590cec93"
-			//hash, err := findHash(defaultCNIAsset)
-			//if err != nil {
-			//	return err
-			//}
-			//hashString := hash.Hex()
 			c.Assets = append(c.Assets, hashString+"@"+defaultCNIAsset)
 		}
 	}
@@ -237,8 +243,8 @@ func (c *ApplyClusterCmd) Run() error {
 		}
 	}
 
-	switch cluster.Spec.CloudProvider {
-	case "gce":
+	switch fi.CloudProviderID(cluster.Spec.CloudProvider) {
+	case fi.CloudProviderGCE:
 		{
 			gceCloud := cloud.(*gce.GCECloud)
 			region = gceCloud.Region
@@ -257,7 +263,7 @@ func (c *ApplyClusterCmd) Run() error {
 			})
 		}
 
-	case "aws":
+	case fi.CloudProviderAWS:
 		{
 			awsCloud := cloud.(awsup.AWSCloud)
 			region = awsCloud.Region()
@@ -607,6 +613,29 @@ func validateDNS(cluster *api.Cluster, cloud fi.Cloud) error {
 
 	if len(matches) > 1 {
 		return fmt.Errorf("found multiple DNS Zones matching %q", cluster.Spec.DNSZone)
+	}
+
+	zone := matches[0]
+	dnsName := strings.TrimSuffix(zone.Name(), ".")
+
+	glog.V(2).Infof("Doing DNS lookup to verify NS records for %q", dnsName)
+	ns, err := net.LookupNS(dnsName)
+	if err != nil {
+		return fmt.Errorf("error doing DNS lookup for NS records for %q: %v", dnsName, err)
+	}
+
+	if len(ns) == 0 {
+		if os.Getenv("DNS_IGNORE_NS_CHECK") == "" {
+			return fmt.Errorf("NS records not found for %q - please make sure they are correctly configured", dnsName)
+		} else {
+			glog.Warningf("Ignoring failed NS record check because DNS_IGNORE_NS_CHECK is set")
+		}
+	} else {
+		var hosts []string
+		for _, n := range ns {
+			hosts = append(hosts, n.Host)
+		}
+		glog.V(2).Infof("Found NS records for %q: %v", dnsName, hosts)
 	}
 
 	return nil

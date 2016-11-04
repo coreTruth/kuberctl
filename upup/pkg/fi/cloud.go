@@ -26,8 +26,6 @@ const CloudProviderGCE CloudProviderID = "gce"
 type Cloud interface {
 	ProviderID() CloudProviderID
 
-	FindDNSHostedZone(dnsName string) (string, error)
-
 	DNS() (dnsprovider.Interface, error)
 }
 
@@ -39,6 +37,12 @@ var zonesToCloud = map[string]CloudProviderID{
 	"us-east-1c": CloudProviderAWS,
 	"us-east-1d": CloudProviderAWS,
 	"us-east-1e": CloudProviderAWS,
+
+	"us-east-2a": CloudProviderAWS,
+	"us-east-2b": CloudProviderAWS,
+	"us-east-2c": CloudProviderAWS,
+	"us-east-2d": CloudProviderAWS,
+	"us-east-2e": CloudProviderAWS,
 
 	"us-west-1a": CloudProviderAWS,
 	"us-west-1b": CloudProviderAWS,

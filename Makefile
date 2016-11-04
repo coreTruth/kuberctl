@@ -23,7 +23,7 @@ GCS_URL=$(GCS_LOCATION:gs://%=https://storage.googleapis.com/%)
 LATEST_FILE?=latest-ci.txt
 GOPATH_1ST=$(shell echo ${GOPATH} | cut -d : -f 1)
 UNIQUE:=$(shell date +%s)
-GOVERSION=1.6
+GOVERSION=1.7.1
 
 # See http://stackoverflow.com/questions/18136918/how-to-get-current-relative-directory-of-your-makefile
 MAKEDIR:=$(strip $(shell dirname "$(realpath $(lastword $(MAKEFILE_LIST)))"))
@@ -109,12 +109,14 @@ upload: kops version-dist
 	aws s3 sync --acl public-read .build/upload/ ${S3_BUCKET}
 
 gcs-upload: version-dist
-	gcloud auth list
+	@echo "== Logging gcloud info =="
+	@gcloud info
+	@echo "== Uploading kops =="
 	gsutil -m rsync -r .build/upload/kops ${GCS_LOCATION}
 
 gcs-publish-ci: gcs-upload
 	echo "${GCS_URL}/${VERSION}" > .build/upload/${LATEST_FILE}
-	gsutil cp .build/upload/${LATEST_FILE} ${GCS_LOCATION}
+	gsutil -h "Cache-Control:private, max-age=0, no-transform" cp .build/upload/${LATEST_FILE} ${GCS_LOCATION}
 
 # Assumes running on linux for speed (todo: crossbuild on OSX?)
 push: nodeup-gocode
@@ -190,6 +192,7 @@ copydeps:
 
 gofmt:
 	gofmt -w -s channels/
+	gofmt -w -s cloudmock/
 	gofmt -w -s cmd/
 	gofmt -w -s examples/
 	gofmt -w -s util/

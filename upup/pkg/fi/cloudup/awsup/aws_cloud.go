@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
 	"github.com/aws/aws-sdk-go/service/elb"
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/route53"
@@ -34,8 +35,17 @@ import (
 	"time"
 )
 
-const MaxDescribeTagsAttempts = 60
-const MaxCreateTagsAttempts = 60
+const DescribeTagsMaxAttempts = 120
+const DescribeTagsRetryInterval = 2 * time.Second
+const DescribeTagsLogInterval = 10 // this is in "retry intervals"
+
+const CreateTagsMaxAttempts = 120
+const CreateTagsRetryInterval = 2 * time.Second
+const CreateTagsLogInterval = 10 // this is in "retry intervals"
+
+const DeleteTagsMaxAttempts = 120
+const DeleteTagsRetryInterval = 2 * time.Second
+const DeleteTagsLogInterval = 10 // this is in "retry intervals"
 
 const TagClusterName = "KubernetesCluster"
 
@@ -44,7 +54,7 @@ type AWSCloud interface {
 
 	Region() string
 
-	EC2() *ec2.EC2
+	EC2() ec2iface.EC2API
 	IAM() *iam.IAM
 	ELB() *elb.ELB
 	Autoscaling() *autoscaling.AutoScaling
@@ -196,12 +206,16 @@ func (c *awsCloudImplementation) GetTags(resourceId string) (map[string]string, 
 		response, err := c.EC2().DescribeTags(request)
 		if err != nil {
 			if isTagsEventualConsistencyError(err) {
-				if attempt > MaxDescribeTagsAttempts {
+				if attempt > DescribeTagsMaxAttempts {
 					return nil, fmt.Errorf("Got retryable error while getting tags on %q, but retried too many times without success: %v", resourceId, err)
 				}
 
+				if (attempt % DescribeTagsLogInterval) == 0 {
+					glog.Infof("waiting for eventual consistency while describing tags on %q", resourceId)
+				}
+
 				glog.V(2).Infof("will retry after encountering error getting tags on %q: %v", resourceId, err)
-				time.Sleep(2 * time.Second)
+				time.Sleep(DescribeTagsRetryInterval)
 				continue
 			}
 
@@ -243,12 +257,16 @@ func (c *awsCloudImplementation) CreateTags(resourceId string, tags map[string]s
 		_, err := c.EC2().CreateTags(request)
 		if err != nil {
 			if isTagsEventualConsistencyError(err) {
-				if attempt > MaxCreateTagsAttempts {
+				if attempt > CreateTagsMaxAttempts {
 					return fmt.Errorf("Got retryable error while creating tags on %q, but retried too many times without success: %v", resourceId, err)
 				}
 
+				if (attempt % CreateTagsLogInterval) == 0 {
+					glog.Infof("waiting for eventual consistency while creating tags on %q", resourceId)
+				}
+
 				glog.V(2).Infof("will retry after encountering error creating tags on %q: %v", resourceId, err)
-				time.Sleep(2 * time.Second)
+				time.Sleep(CreateTagsRetryInterval)
 				continue
 			}
 
@@ -282,12 +300,16 @@ func (c *awsCloudImplementation) DeleteTags(resourceId string, tags map[string]s
 		_, err := c.EC2().DeleteTags(request)
 		if err != nil {
 			if isTagsEventualConsistencyError(err) {
-				if attempt > MaxCreateTagsAttempts {
+				if attempt > DeleteTagsMaxAttempts {
 					return fmt.Errorf("Got retryable error while deleting tags on %q, but retried too many times without success: %v", resourceId, err)
 				}
 
+				if (attempt % DeleteTagsLogInterval) == 0 {
+					glog.Infof("waiting for eventual consistency while deleting tags on %q", resourceId)
+				}
+
 				glog.V(2).Infof("will retry after encountering error deleting tags on %q: %v", resourceId, err)
-				time.Sleep(2 * time.Second)
+				time.Sleep(DeleteTagsRetryInterval)
 				continue
 			}
 
@@ -584,64 +606,7 @@ func (c *awsCloudImplementation) DNS() (dnsprovider.Interface, error) {
 	return provider, nil
 }
 
-func (c *awsCloudImplementation) FindDNSHostedZone(clusterDNSName string) (string, error) {
-	glog.V(2).Infof("Querying for all route53 zones to find match for %q", clusterDNSName)
-
-	clusterDNSName = "." + strings.TrimSuffix(clusterDNSName, ".")
-
-	var zones []*route53.HostedZone
-	request := &route53.ListHostedZonesInput{}
-	err := c.Route53().ListHostedZonesPages(request, func(p *route53.ListHostedZonesOutput, lastPage bool) bool {
-		for _, zone := range p.HostedZones {
-			zoneName := aws.StringValue(zone.Name)
-			zoneName = "." + strings.TrimSuffix(zoneName, ".")
-
-			if strings.HasSuffix(clusterDNSName, zoneName) {
-				zones = append(zones, zone)
-			}
-		}
-		return true
-	})
-	if err != nil {
-		return "", fmt.Errorf("error querying for route53 zones: %v", err)
-	}
-
-	// Find the longest zones
-	maxLength := -1
-	maxLengthZones := []*route53.HostedZone{}
-	for _, z := range zones {
-		n := len(aws.StringValue(z.Name))
-		if n < maxLength {
-			continue
-		}
-
-		if n > maxLength {
-			maxLength = n
-			maxLengthZones = []*route53.HostedZone{}
-		}
-
-		maxLengthZones = append(maxLengthZones, z)
-	}
-
-	if len(maxLengthZones) == 0 {
-		// We make this an error because you have to set up DNS delegation anyway
-		tokens := strings.Split(clusterDNSName, ".")
-		suffix := strings.Join(tokens[len(tokens)-2:], ".")
-		//glog.Warningf("No matching hosted zones found; will created %q", suffix)
-		//return suffix, nil
-		return "", fmt.Errorf("No matching hosted zones found for %q; please create one (e.g. %q) first", clusterDNSName, suffix)
-	}
-
-	if len(maxLengthZones) == 1 {
-		id := aws.StringValue(maxLengthZones[0].Id)
-		id = strings.TrimPrefix(id, "/hostedzone/")
-		return id, nil
-	}
-
-	return "", fmt.Errorf("Found multiple hosted zones matching cluster %q; please specify the ID of the zone to use", clusterDNSName)
-}
-
-func (c *awsCloudImplementation) EC2() *ec2.EC2 {
+func (c *awsCloudImplementation) EC2() ec2iface.EC2API {
 	return c.ec2
 }
 

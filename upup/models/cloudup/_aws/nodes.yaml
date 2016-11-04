@@ -17,7 +17,8 @@ iamInstanceProfileRole/nodes.{{ ClusterName }}:
 securityGroup/nodes.{{ ClusterName }}:
   vpc: vpc/{{ ClusterName }}
   description: 'Security group for nodes'
-  removeExtraRules: true
+  removeExtraRules:
+  - port=22
 
 # Allow full egress
 securityGroupRule/node-egress:
@@ -25,13 +26,15 @@ securityGroupRule/node-egress:
   egress: true
   cidr: 0.0.0.0/0
 
-# SSH is open to the world
-securityGroupRule/ssh-external-to-node:
+# SSH is open to CIDRs defined in the cluster configuration
+{{ range $index, $cidr := AdminCIDR }}
+securityGroupRule/ssh-external-to-node-{{ $index }}:
   securityGroup: securityGroup/nodes.{{ ClusterName }}
-  cidr: {{ AdminCIDR }}
+  cidr: {{ $cidr }}
   protocol: tcp
   fromPort: 22
   toPort: 22
+{{ end }}
 
 # Nodes can talk to nodes
 securityGroupRule/all-node-to-node:
