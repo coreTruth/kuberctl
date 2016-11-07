@@ -389,8 +389,8 @@ type KubeAPIServerConfig struct {
 	AllowPrivileged            *bool             `json:"allowPrivileged,omitempty" flag:"allow-privileged"`
 	APIServerCount             *int              `json:"apiServerCount,omitempty" flag:"apiserver-count"`
 	RuntimeConfig              map[string]string `json:"runtimeConfig,omitempty" flag:"runtime-config"`
-	AuthorizationMode          string            `json:"AuthorizationMode,omitempty" flag:"authorization-mode"`
-	AuthorizationRBACSuperUser string            `json:"AuthorizationRBACSuperUser,omitempty" flag:"authorization-rbac-super-user"`
+	AuthorizationMode          string            `json:"authorizationMode,omitempty" flag:"authorization-mode"`
+	AuthorizationRBACSuperUser string            `json:"authorizationRBACSuperUser,omitempty" flag:"authorization-rbac-super-user"`
 }
 
 type KubeControllerManagerConfig struct {
