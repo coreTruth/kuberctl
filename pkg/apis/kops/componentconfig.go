@@ -25,7 +25,7 @@ import (
 
 type KubeletConfig struct {
 	unversioned.TypeMeta `json:",inline"`
-	ObjectMeta    `json:"metadata,omitempty"`
+	ObjectMeta           `json:"metadata,omitempty"`
 
 	Spec ClusterSpec `json:"spec,omitempty"`
 }
@@ -389,7 +389,8 @@ type KubeAPIServerConfig struct {
 	AllowPrivileged            *bool             `json:"allowPrivileged,omitempty" flag:"allow-privileged"`
 	APIServerCount             *int              `json:"apiServerCount,omitempty" flag:"apiserver-count"`
 	RuntimeConfig              map[string]string `json:"runtimeConfig,omitempty" flag:"runtime-config"`
-	AuthorizationMode          string            `json:"authorizationMode,omitempty" flag:"authorization-mode"`
+	AuthorizationMode          []string          `json:"authorizationMode,omitempty" flag:"authorization-mode"`
+	AuthorizationPolicyFile    string            `json:"authorizationPolicyFile,omitempty" flag:"authorization-policy-file"`
 	AuthorizationRBACSuperUser string            `json:"authorizationRBACSuperUser,omitempty" flag:"authorization-rbac-super-user"`
 }
 
