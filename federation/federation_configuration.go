@@ -18,21 +18,23 @@ package federation
 
 import (
 	"fmt"
-	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kops/federation/targets/kubernetes"
-	"k8s.io/kubernetes/pkg/api/errors"
 	"github.com/golang/glog"
-	"k8s.io/kops/upup/pkg/kutil"
+	"k8s.io/kops/federation/targets/kubernetes"
 	kopsapi "k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/kubeconfig"
+	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/fitasks"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/release_1_3"
+	"k8s.io/kops/upup/pkg/kutil"
+	"k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/api/v1"
+	meta_v1 "k8s.io/kubernetes/pkg/apis/meta/v1"
+	k8s_clientset "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
 )
 
 const UserAdmin = "admin"
 
 type FederationConfiguration struct {
-	Namespace            string
+	Namespace string
 
 	ApiserverKeypair     *fitasks.Keypair
 	ApiserverServiceName string
@@ -41,13 +43,13 @@ type FederationConfiguration struct {
 	KubeconfigSecretName string
 }
 
-func (o*FederationConfiguration) extractKubecfg(c *fi.Context, f *kopsapi.Federation) (*kutil.KubeconfigBuilder, error) {
+func (o *FederationConfiguration) extractKubecfg(c *fi.Context, f *kopsapi.Federation) (*kutil.KubeconfigBuilder, error) {
 	// TODO: move this
 	masterName := "api." + f.Spec.DNSName
 
 	k := kutil.NewKubeconfigBuilder()
 	k.KubeMasterIP = masterName
-	k.Context = "federation-" + f.Name
+	k.Context = "federation-" + f.ObjectMeta.Name
 
 	// CA Cert
 	caCert, _, err := c.Keystore.FindKeypair(fi.CertificateId_CA)
@@ -113,7 +115,7 @@ func (o*FederationConfiguration) extractKubecfg(c *fi.Context, f *kopsapi.Federa
 	return k, nil
 }
 
-func (o*FederationConfiguration) findBasicAuth(secret *v1.Secret) (*AuthFile, error) {
+func (o *FederationConfiguration) findBasicAuth(secret *v1.Secret) (*AuthFile, error) {
 	var basicAuthData *AuthFile
 	var err error
 
@@ -131,7 +133,7 @@ func (o*FederationConfiguration) findBasicAuth(secret *v1.Secret) (*AuthFile, er
 	return basicAuthData, nil
 }
 
-func (o*FederationConfiguration) findKnownTokens(secret *v1.Secret) (*AuthFile, error) {
+func (o *FederationConfiguration) findKnownTokens(secret *v1.Secret) (*AuthFile, error) {
 	var knownTokens *AuthFile
 	var err error
 
@@ -149,7 +151,7 @@ func (o*FederationConfiguration) findKnownTokens(secret *v1.Secret) (*AuthFile, 
 	return knownTokens, nil
 }
 
-func (o*FederationConfiguration) EnsureConfiguration(c *fi.Context) error {
+func (o *FederationConfiguration) EnsureConfiguration(c *fi.Context) error {
 	caCert, _, err := c.Keystore.FindKeypair(fi.CertificateId_CA)
 	if err != nil {
 		return err
@@ -169,7 +171,7 @@ func (o*FederationConfiguration) EnsureConfiguration(c *fi.Context) error {
 	k8s := c.Target.(*kubernetes.KubernetesTarget).KubernetesClient
 
 	adminPassword := ""
-	adminToken := ""
+	//adminToken := ""
 
 	_, err = mutateSecret(k8s, o.Namespace, o.ApiserverSecretName, func(s *v1.Secret) (*v1.Secret, error) {
 		basicAuthData, err := o.findBasicAuth(s)
@@ -214,11 +216,11 @@ func (o*FederationConfiguration) EnsureConfiguration(c *fi.Context) error {
 				}
 				err = knownTokens.Add(&AuthFileLine{User: UserAdmin, Secret: string(s.Data), Role: "admin"})
 				if err != nil {
-					return nil,  err
+					return nil, err
 				}
-				adminToken = string(s.Data)
+				//adminToken = string(s.Data)
 			} else {
-				adminToken = u.Secret
+				//adminToken = u.Secret
 			}
 		}
 
@@ -259,8 +261,8 @@ func (o*FederationConfiguration) EnsureConfiguration(c *fi.Context) error {
 	})
 
 	// TODO: Prefer username / password or token?
-	user := kutil.KubectlUser{
-		Username:UserAdmin,
+	user := kubeconfig.KubectlUser{
+		Username: UserAdmin,
 		Password: adminPassword,
 		//Token: adminToken,
 	}
@@ -272,7 +274,7 @@ func (o*FederationConfiguration) EnsureConfiguration(c *fi.Context) error {
 	return nil
 }
 
-func (o*FederationConfiguration) ensureSecretKubeconfig(c *fi.Context, caCert *fi.Certificate, user kutil.KubectlUser) error {
+func (o *FederationConfiguration) ensureSecretKubeconfig(c *fi.Context, caCert *fi.Certificate, user kubeconfig.KubectlUser) error {
 	k8s := c.Target.(*kubernetes.KubernetesTarget).KubernetesClient
 
 	_, err := mutateSecret(k8s, o.Namespace, o.KubeconfigSecretName, func(s *v1.Secret) (*v1.Secret, error) {
@@ -280,14 +282,14 @@ func (o*FederationConfiguration) ensureSecretKubeconfig(c *fi.Context, caCert *f
 		var err error
 
 		{
-			kubeconfig := &kutil.KubectlConfig{
+			conf := &kubeconfig.KubectlConfig{
 				ApiVersion: "v1",
-				Kind: "Config",
+				Kind:       "Config",
 			}
 
-			cluster := &kutil.KubectlClusterWithName{
+			cluster := &kubeconfig.KubectlClusterWithName{
 				Name: o.ApiserverServiceName,
-				Cluster: kutil.KubectlCluster{
+				Cluster: kubeconfig.KubectlCluster{
 					Server: "https://" + o.ApiserverServiceName,
 				},
 			}
@@ -300,25 +302,25 @@ func (o*FederationConfiguration) ensureSecretKubeconfig(c *fi.Context, caCert *f
 				cluster.Cluster.CertificateAuthorityData = caCertData
 			}
 
-			kubeconfig.Clusters = append(kubeconfig.Clusters, cluster)
+			conf.Clusters = append(conf.Clusters, cluster)
 
-			user := &kutil.KubectlUserWithName{
+			user := &kubeconfig.KubectlUserWithName{
 				Name: o.ApiserverServiceName,
 				User: user,
 			}
-			kubeconfig.Users = append(kubeconfig.Users, user)
+			conf.Users = append(conf.Users, user)
 
-			context := &kutil.KubectlContextWithName{
+			context := &kubeconfig.KubectlContextWithName{
 				Name: o.ApiserverServiceName,
-				Context: kutil.KubectlContext{
+				Context: kubeconfig.KubectlContext{
 					Cluster: cluster.Name,
-					User: user.Name,
+					User:    user.Name,
 				},
 			}
-			kubeconfig.CurrentContext = o.ApiserverServiceName
-			kubeconfig.Contexts = append(kubeconfig.Contexts, context)
+			conf.CurrentContext = o.ApiserverServiceName
+			conf.Contexts = append(conf.Contexts, context)
 
-			kubeconfigData, err = kopsapi.ToYaml(kubeconfig)
+			kubeconfigData, err = kopsapi.ToRawYaml(conf)
 			if err != nil {
 				return nil, fmt.Errorf("error building kubeconfig: %v", err)
 			}
@@ -339,9 +341,9 @@ func (o*FederationConfiguration) ensureSecretKubeconfig(c *fi.Context, caCert *f
 	return err
 }
 
-func findSecret(k8s release_1_3.Interface, namespace, name string) (*v1.Secret, error) {
+func findSecret(k8s k8s_clientset.Interface, namespace, name string) (*v1.Secret, error) {
 	glog.V(2).Infof("querying k8s for secret %s/%s", namespace, name)
-	s, err := k8s.Core().Secrets(namespace).Get(name)
+	s, err := k8s.Core().Secrets(namespace).Get(name, meta_v1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil, nil
@@ -352,7 +354,7 @@ func findSecret(k8s release_1_3.Interface, namespace, name string) (*v1.Secret, 
 	return s, nil
 }
 
-func mutateSecret(k8s release_1_3.Interface, namespace string, name string, fn func(s *v1.Secret) (*v1.Secret, error)) (*v1.Secret, error) {
+func mutateSecret(k8s k8s_clientset.Interface, namespace string, name string, fn func(s *v1.Secret) (*v1.Secret, error)) (*v1.Secret, error) {
 	existing, err := findSecret(k8s, namespace, name)
 	if err != nil {
 		return nil, err

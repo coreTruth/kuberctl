@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"k8s.io/kops"
 )
 
 type VersionCmd struct {
@@ -46,7 +47,11 @@ func init() {
 }
 
 func (c *VersionCmd) Run() error {
-	fmt.Printf("Version %s\n", BuildVersion)
+	s := "Version " + kops.Version
+	if kops.GitVersion != "" {
+		s += " (git-" + kops.GitVersion + ")"
+	}
+	fmt.Println(s)
 
 	return nil
 }

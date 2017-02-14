@@ -18,22 +18,34 @@ package cloudup
 
 import (
 	"fmt"
+
+	"github.com/blang/semver"
 	"github.com/golang/glog"
 	api "k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kops/upup/pkg/fi/utils"
 )
 
-const DefaultNodeMachineTypeAWS = "t2.medium"
-const DefaultNodeMachineTypeGCE = "n1-standard-2"
+// Default Machine types for various types of instance group machine
+const (
+	defaultNodeMachineTypeAWS = "t2.medium"
+	defaultNodeMachineTypeGCE = "n1-standard-2"
 
-const DefaultMasterMachineTypeAWS = "m3.medium"
+	defaultBastionMachineTypeAWS = "t2.micro"
+	defaultBastionMachineTypeGCE = "f1-micro"
 
-// us-east-2 does not (currently) support the m3 family; the c4 large is the cheapest non-burstable instance
-const DefaultMasterMachineTypeAWS_USEAST2 = "c4.large"
+	defaultMasterMachineTypeGCE = "n1-standard-1"
+	defaultMasterMachineTypeAWS = "m3.medium"
+)
 
-const DefaultMasterMachineTypeGCE = "n1-standard-1"
+var masterMachineTypeExceptions = map[string]string{
+	// Some regions do not (currently) support the m3 family; the c4 large is the cheapest non-burstable instance
+	"us-east-2":    "c4.large",
+	"ca-central-1": "c4.large",
+	"eu-west-2":    "c4.large",
+}
 
 // PopulateInstanceGroupSpec sets default values in the InstanceGroup
 // The InstanceGroup is simpler than the cluster spec, so we just populate in place (like the rest of k8s)
@@ -46,30 +58,37 @@ func PopulateInstanceGroupSpec(cluster *api.Cluster, input *api.InstanceGroup, c
 	ig := &api.InstanceGroup{}
 	utils.JsonMergeStruct(ig, input)
 
+	// TODO: Clean up
 	if ig.IsMaster() {
 		if ig.Spec.MachineType == "" {
 			ig.Spec.MachineType = defaultMasterMachineType(cluster)
 		}
 		if ig.Spec.MinSize == nil {
-			ig.Spec.MinSize = fi.Int(1)
+			ig.Spec.MinSize = fi.Int32(1)
 		}
 		if ig.Spec.MaxSize == nil {
-			ig.Spec.MaxSize = fi.Int(1)
+			ig.Spec.MaxSize = fi.Int32(1)
+		}
+	} else if ig.Spec.Role == api.InstanceGroupRoleBastion {
+		if ig.Spec.MachineType == "" {
+			ig.Spec.MachineType = defaultBastionMachineType(cluster)
+		}
+		if ig.Spec.MinSize == nil {
+			ig.Spec.MinSize = fi.Int32(1)
+		}
+		if ig.Spec.MaxSize == nil {
+			ig.Spec.MaxSize = fi.Int32(1)
 		}
 	} else {
 		if ig.Spec.MachineType == "" {
 			ig.Spec.MachineType = defaultNodeMachineType(cluster)
 		}
 		if ig.Spec.MinSize == nil {
-			ig.Spec.MinSize = fi.Int(2)
+			ig.Spec.MinSize = fi.Int32(2)
 		}
 		if ig.Spec.MaxSize == nil {
-			ig.Spec.MaxSize = fi.Int(2)
+			ig.Spec.MaxSize = fi.Int32(2)
 		}
-	}
-
-	if ig.Spec.AssociatePublicIP == nil {
-		ig.Spec.AssociatePublicIP = fi.Bool(true)
 	}
 
 	if ig.Spec.Image == "" {
@@ -77,15 +96,29 @@ func PopulateInstanceGroupSpec(cluster *api.Cluster, input *api.InstanceGroup, c
 	}
 
 	if ig.IsMaster() {
-		if len(ig.Spec.Zones) == 0 {
-			return nil, fmt.Errorf("Master InstanceGroup %s did not specify any Zones", ig.Name)
+		if len(ig.Spec.Subnets) == 0 {
+			return nil, fmt.Errorf("Master InstanceGroup %s did not specify any Subnets", ig.ObjectMeta.Name)
 		}
-	} else {
-		if len(ig.Spec.Zones) == 0 {
-			for _, z := range cluster.Spec.Zones {
-				ig.Spec.Zones = append(ig.Spec.Zones, z.Name)
+	} else if ig.Spec.Role == api.InstanceGroupRoleBastion {
+		if len(ig.Spec.Subnets) == 0 {
+			for _, subnet := range cluster.Spec.Subnets {
+				if subnet.Type == api.SubnetTypeUtility {
+					ig.Spec.Subnets = append(ig.Spec.Subnets, subnet.Name)
+				}
 			}
 		}
+	} else {
+		if len(ig.Spec.Subnets) == 0 {
+			for _, subnet := range cluster.Spec.Subnets {
+				if subnet.Type != api.SubnetTypeUtility {
+					ig.Spec.Subnets = append(ig.Spec.Subnets, subnet.Name)
+				}
+			}
+		}
+	}
+
+	if len(ig.Spec.Subnets) == 0 {
+		return nil, fmt.Errorf("unable to infer any Subnets for InstanceGroup %s ", ig.ObjectMeta.Name)
 	}
 
 	return ig, nil
@@ -95,9 +128,9 @@ func PopulateInstanceGroupSpec(cluster *api.Cluster, input *api.InstanceGroup, c
 func defaultNodeMachineType(cluster *api.Cluster) string {
 	switch fi.CloudProviderID(cluster.Spec.CloudProvider) {
 	case fi.CloudProviderAWS:
-		return DefaultNodeMachineTypeAWS
+		return defaultNodeMachineTypeAWS
 	case fi.CloudProviderGCE:
-		return DefaultNodeMachineTypeGCE
+		return defaultNodeMachineTypeGCE
 	default:
 		glog.V(2).Infof("Cannot set default MachineType for CloudProvider=%q", cluster.Spec.CloudProvider)
 		return ""
@@ -141,13 +174,28 @@ func defaultMasterMachineType(cluster *api.Cluster) string {
 		if err != nil {
 			glog.Warningf("cannot determine region from cluster zones: %v", err)
 		}
-		if region == "us-east-2" {
-			glog.Warningf("%q instance is not available in region %q, will set master to %q instead", DefaultMasterMachineTypeAWS, region, DefaultMasterMachineTypeAWS_USEAST2)
-			return DefaultMasterMachineTypeAWS_USEAST2
+		// Check for special-cases
+		masterMachineType := masterMachineTypeExceptions[region]
+		if masterMachineType != "" {
+			glog.Warningf("%q instance is not available in region %q, will set master to %q instead", defaultMasterMachineTypeAWS, region, masterMachineType)
+			return masterMachineType
 		}
-		return DefaultMasterMachineTypeAWS
+		return defaultMasterMachineTypeAWS
 	case fi.CloudProviderGCE:
-		return DefaultMasterMachineTypeGCE
+		return defaultMasterMachineTypeGCE
+	default:
+		glog.V(2).Infof("Cannot set default MachineType for CloudProvider=%q", cluster.Spec.CloudProvider)
+		return ""
+	}
+}
+
+// defaultBastionMachineType returns the default MachineType for bastions, based on the cloudprovider
+func defaultBastionMachineType(cluster *api.Cluster) string {
+	switch fi.CloudProviderID(cluster.Spec.CloudProvider) {
+	case fi.CloudProviderAWS:
+		return defaultBastionMachineTypeAWS
+	case fi.CloudProviderGCE:
+		return defaultBastionMachineTypeGCE
 	default:
 		glog.V(2).Infof("Cannot set default MachineType for CloudProvider=%q", cluster.Spec.CloudProvider)
 		return ""
@@ -157,9 +205,19 @@ func defaultMasterMachineType(cluster *api.Cluster) string {
 // defaultImage returns the default Image, based on the cloudprovider
 func defaultImage(cluster *api.Cluster, channel *api.Channel) string {
 	if channel != nil {
-		image := channel.FindImage(fi.CloudProviderID(cluster.Spec.CloudProvider))
-		if image != nil {
-			return image.Name
+		var kubernetesVersion *semver.Version
+		if cluster.Spec.KubernetesVersion != "" {
+			var err error
+			kubernetesVersion, err = util.ParseKubernetesVersion(cluster.Spec.KubernetesVersion)
+			if err != nil {
+				glog.Warningf("cannot parse KubernetesVersion %q in cluster", cluster.Spec.KubernetesVersion)
+			}
+		}
+		if kubernetesVersion != nil {
+			image := channel.FindImage(fi.CloudProviderID(cluster.Spec.CloudProvider), *kubernetesVersion)
+			if image != nil {
+				return image.Name
+			}
 		}
 	}
 

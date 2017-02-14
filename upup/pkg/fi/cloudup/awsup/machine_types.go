@@ -18,6 +18,7 @@ package awsup
 
 import (
 	"fmt"
+
 	"github.com/golang/glog"
 )
 
@@ -31,6 +32,7 @@ type AWSMachineTypeInfo struct {
 	Cores          int
 	EphemeralDisks []int
 	Burstable      bool
+	GPU            bool
 }
 
 type EphemeralDevice struct {
@@ -110,6 +112,22 @@ var MachineTypes []AWSMachineTypeInfo = []AWSMachineTypeInfo{
 		MemoryGB:       8,
 		ECU:            36 * BurstableCreditsToECUS,
 		Cores:          2,
+		EphemeralDisks: nil,
+		Burstable:      true,
+	},
+	{
+		Name:           "t2.xlarge",
+		MemoryGB:       16,
+		ECU:            54 * BurstableCreditsToECUS,
+		Cores:          4,
+		EphemeralDisks: nil,
+		Burstable:      true,
+	},
+	{
+		Name:           "t2.2xlarge",
+		MemoryGB:       32,
+		ECU:            81 * BurstableCreditsToECUS,
+		Cores:          8,
 		EphemeralDisks: nil,
 		Burstable:      true,
 	},
@@ -271,6 +289,7 @@ var MachineTypes []AWSMachineTypeInfo = []AWSMachineTypeInfo{
 		ECU:            33.5,
 		Cores:          16,
 		EphemeralDisks: []int{840, 840},
+		GPU:            true,
 	},
 
 	// cr1 family
@@ -327,6 +346,7 @@ var MachineTypes []AWSMachineTypeInfo = []AWSMachineTypeInfo{
 		ECU:            26,
 		Cores:          8,
 		EphemeralDisks: []int{60},
+		GPU:            true,
 	},
 	{
 		Name:           "g2.8xlarge",
@@ -334,6 +354,7 @@ var MachineTypes []AWSMachineTypeInfo = []AWSMachineTypeInfo{
 		ECU:            104,
 		Cores:          32,
 		EphemeralDisks: []int{120, 120},
+		GPU:            true,
 	},
 
 	// hi1 family
@@ -419,5 +440,75 @@ var MachineTypes []AWSMachineTypeInfo = []AWSMachineTypeInfo{
 		ECU:            349,
 		Cores:          128,
 		EphemeralDisks: []int{1920, 1920},
+	},
+
+	// r4 family
+	{
+		Name:           "r4.large",
+		MemoryGB:       15.25,
+		ECU:            7,
+		Cores:          2,
+		EphemeralDisks: nil,
+	},
+	{
+		Name:           "r4.xlarge",
+		MemoryGB:       30.5,
+		ECU:            13.5,
+		Cores:          4,
+		EphemeralDisks: nil,
+	},
+	{
+		Name:           "r4.2xlarge",
+		MemoryGB:       61,
+		ECU:            27,
+		Cores:          8,
+		EphemeralDisks: nil,
+	},
+	{
+		Name:           "r4.4xlarge",
+		MemoryGB:       122,
+		ECU:            53,
+		Cores:          16,
+		EphemeralDisks: nil,
+	},
+	{
+		Name:           "r4.8xlarge",
+		MemoryGB:       244,
+		ECU:            99,
+		Cores:          32,
+		EphemeralDisks: nil,
+	},
+	{
+		Name:           "r4.16xlarge",
+		MemoryGB:       488,
+		ECU:            195,
+		Cores:          64,
+		EphemeralDisks: nil,
+	},
+
+	// p2 family
+	{
+		Name:           "p2.xlarge",
+		MemoryGB:       61,
+		ECU:            12,
+		Cores:          4,
+		EphemeralDisks: nil,
+		GPU:            true,
+	},
+	{
+		Name:           "p2.8xlarge",
+		MemoryGB:       488,
+		ECU:            94,
+		Cores:          32,
+		EphemeralDisks: nil,
+		GPU:            true,
+	},
+	{
+		Name:           "p2.16xlarge",
+		MemoryGB:       732,
+		ECU:            188,
+		Cores:          64,
+		EphemeralDisks: nil,
+		GPU:            true,
 	},
 }

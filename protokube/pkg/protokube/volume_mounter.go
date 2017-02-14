@@ -21,7 +21,9 @@ import (
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/mount"
+	"k8s.io/kubernetes/pkg/util/sets"
 	"os"
+	"sort"
 	"time"
 )
 
@@ -105,7 +107,7 @@ func (k *VolumeMountController) safeFormatAndMount(device string, mountpoint str
 
 	// If we are containerized, we still first SafeFormatAndMount in our namespace
 	// This is because SafeFormatAndMount doesn't seem to work in a container
-	safeFormatAndMount := &mount.SafeFormatAndMount{Interface: mount.New(), Runner: exec.New()}
+	safeFormatAndMount := &mount.SafeFormatAndMount{Interface: mount.New(""), Runner: exec.New()}
 
 	// Check if it is already mounted
 	mounts, err := safeFormatAndMount.List()
@@ -178,9 +180,6 @@ func (k *VolumeMountController) attachMasterVolumes() ([]*Volume, error) {
 		return nil, err
 	}
 
-	// TODO: Only mount one of e.g. an etcd cluster?
-	// Currently taken care of by zone rules though
-
 	var tryAttach []*Volume
 	var attached []*Volume
 	for _, v := range volumes {
@@ -192,21 +191,76 @@ func (k *VolumeMountController) attachMasterVolumes() ([]*Volume, error) {
 		}
 	}
 
-	if len(tryAttach) != 0 {
-		for _, v := range tryAttach {
-			glog.V(2).Infof("Trying to mount master volume: %q", v.ID)
+	if len(tryAttach) == 0 {
+		return attached, nil
+	}
 
-			err := k.provider.AttachVolume(v)
-			if err != nil {
-				glog.Warningf("Error attaching volume %q: %v", v.ID, err)
-			} else {
-				if v.LocalDevice == "" {
-					glog.Fatalf("AttachVolume did not set LocalDevice")
-				}
-				attached = append(attached, v)
+	// Make sure we don't try to mount multiple volumes from the same cluster
+	attachedClusters := sets.NewString()
+	for _, attached := range attached {
+		for _, etcdCluster := range attached.Info.EtcdClusters {
+			attachedClusters.Insert(etcdCluster.ClusterKey)
+		}
+	}
+
+	// Mount in a consistent order
+	sort.Stable(ByEtcdClusterName(tryAttach))
+
+	// Actually attempt the mounting
+	for _, v := range tryAttach {
+		alreadyMounted := ""
+		for _, etcdCluster := range v.Info.EtcdClusters {
+			if attachedClusters.Has(etcdCluster.ClusterKey) {
+				alreadyMounted = etcdCluster.ClusterKey
+			}
+		}
+
+		if alreadyMounted != "" {
+			glog.V(2).Infof("Skipping mount of master volume %q, because etcd cluster %q is already mounted", v.ID, alreadyMounted)
+			continue
+		}
+
+		glog.V(2).Infof("Trying to mount master volume: %q", v.ID)
+
+		err := k.provider.AttachVolume(v)
+		if err != nil {
+			// We are racing with other instances here; this can happen
+			glog.Warningf("Error attaching volume %q: %v", v.ID, err)
+		} else {
+			if v.LocalDevice == "" {
+				glog.Fatalf("AttachVolume did not set LocalDevice")
+			}
+			attached = append(attached, v)
+
+			// Mark this cluster as attached now
+			for _, etcdCluster := range v.Info.EtcdClusters {
+				attachedClusters.Insert(etcdCluster.ClusterKey)
 			}
 		}
 	}
 
 	return attached, nil
+}
+
+// ByEtcdClusterName sorts volumes so that we mount in a consistent order,
+// and in addition we try to mount the main etcd volume before the events etcd volume
+type ByEtcdClusterName []*Volume
+
+func (a ByEtcdClusterName) Len() int {
+	return len(a)
+}
+func (a ByEtcdClusterName) Swap(i, j int) {
+	a[i], a[j] = a[j], a[i]
+}
+func (a ByEtcdClusterName) Less(i, j int) bool {
+	nameI := ""
+	if len(a[i].Info.EtcdClusters) > 0 {
+		nameI = a[i].Info.EtcdClusters[0].ClusterKey
+	}
+	nameJ := ""
+	if len(a[j].Info.EtcdClusters) > 0 {
+		nameJ = a[j].Info.EtcdClusters[0].ClusterKey
+	}
+	// reverse so "main" comes before "events"
+	return nameI > nameJ
 }

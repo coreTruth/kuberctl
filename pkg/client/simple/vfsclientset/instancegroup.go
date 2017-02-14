@@ -26,6 +26,8 @@ import (
 
 type InstanceGroupVFS struct {
 	commonVFS
+
+	clusterName string
 }
 
 func newInstanceGroupVFS(c *VFSClientset, clusterName string) *InstanceGroupVFS {
@@ -33,25 +35,39 @@ func newInstanceGroupVFS(c *VFSClientset, clusterName string) *InstanceGroupVFS 
 		glog.Fatalf("clusterName is required")
 	}
 
-	key := "instancegroup"
+	kind := "InstanceGroup"
 
-	r := &InstanceGroupVFS{}
-	r.init(key, c.basePath.Join(clusterName, key), v1alpha1.SchemeGroupVersion)
+	r := &InstanceGroupVFS{
+		clusterName: clusterName,
+	}
+	r.init(kind, c.basePath.Join(clusterName, "instancegroup"), StoreVersion)
+	defaultReadVersion := v1alpha1.SchemeGroupVersion.WithKind(kind)
+	r.defaultReadVersion = &defaultReadVersion
 	return r
 }
 
 var _ simple.InstanceGroupInterface = &InstanceGroupVFS{}
 
 func (c *InstanceGroupVFS) Get(name string) (*api.InstanceGroup, error) {
-	v := &api.InstanceGroup{}
-	found, err := c.get(name, v)
+	o, err := c.get(name)
 	if err != nil {
 		return nil, err
 	}
-	if !found {
+	if o == nil {
 		return nil, nil
 	}
-	return v, nil
+
+	ig := o.(*api.InstanceGroup)
+	c.addLabels(ig)
+
+	return ig, nil
+}
+
+func (c *InstanceGroupVFS) addLabels(ig *api.InstanceGroup) {
+	if ig.ObjectMeta.Labels == nil {
+		ig.ObjectMeta.Labels = make(map[string]string)
+	}
+	ig.ObjectMeta.Labels[api.LabelClusterName] = c.clusterName
 }
 
 func (c *InstanceGroupVFS) List(options k8sapi.ListOptions) (*api.InstanceGroupList, error) {
@@ -61,6 +77,9 @@ func (c *InstanceGroupVFS) List(options k8sapi.ListOptions) (*api.InstanceGroupL
 		return nil, err
 	}
 	list.Items = items.([]api.InstanceGroup)
+	for i := range list.Items {
+		c.addLabels(&list.Items[i])
+	}
 	return list, nil
 }
 

@@ -22,8 +22,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/spf13/cobra"
 	"io"
+
+	"github.com/spf13/cobra"
 	"k8s.io/kops/cmd/kops/util"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
@@ -40,7 +41,11 @@ func NewCmdEditInstanceGroup(f *util.Factory, out io.Writer) *cobra.Command {
 		Use:     "instancegroup",
 		Aliases: []string{"instancegroups", "ig"},
 		Short:   "Edit instancegroup",
-		Long:    `Edit an instancegroup configuration.`,
+		Long: `Edit an instancegroup configuration.
+
+This command changes the cloud specification in the registry.
+
+It does not update the cloud resources, to apply the changes use "kops update cluster".`,
 		Run: func(cmd *cobra.Command, args []string) {
 
 			err := RunEditInstanceGroup(f, cmd, args, os.Stdout, options)
@@ -82,7 +87,7 @@ func RunEditInstanceGroup(f *util.Factory, cmd *cobra.Command, args []string, ou
 		return fmt.Errorf("name is required")
 	}
 
-	oldGroup, err := clientset.InstanceGroups(cluster.Name).Get(groupName)
+	oldGroup, err := clientset.InstanceGroups(cluster.ObjectMeta.Name).Get(groupName)
 	if err != nil {
 		return fmt.Errorf("error reading InstanceGroup %q: %v", groupName, err)
 	}
@@ -95,9 +100,9 @@ func RunEditInstanceGroup(f *util.Factory, cmd *cobra.Command, args []string, ou
 	)
 
 	ext := "yaml"
-	raw, err := api.ToYaml(oldGroup)
+	raw, err := api.ToVersionedYaml(oldGroup)
 	if err != nil {
-		return fmt.Errorf("error parsing InstanceGroup: %v", err)
+		return err
 	}
 
 	// launch the editor
@@ -116,10 +121,14 @@ func RunEditInstanceGroup(f *util.Factory, cmd *cobra.Command, args []string, ou
 		return nil
 	}
 
-	newGroup := &api.InstanceGroup{}
-	err = api.ParseYaml(edited, newGroup)
+	newObj, _, err := api.ParseVersionedYaml(edited)
 	if err != nil {
-		return fmt.Errorf("error parsing config: %v", err)
+		return fmt.Errorf("error parsing InstanceGroup: %v", err)
+	}
+
+	newGroup, ok := newObj.(*api.InstanceGroup)
+	if !ok {
+		return fmt.Errorf("object was not of expected type: %T", newObj)
 	}
 
 	err = newGroup.Validate()
@@ -134,7 +143,7 @@ func RunEditInstanceGroup(f *util.Factory, cmd *cobra.Command, args []string, ou
 
 	// We need the full cluster spec to perform deep validation
 	// Note that we don't write it back though
-	err = cluster.PerformAssignments()
+	err = cloudup.PerformAssignments(cluster)
 	if err != nil {
 		return fmt.Errorf("error populating configuration: %v", err)
 	}
@@ -150,7 +159,7 @@ func RunEditInstanceGroup(f *util.Factory, cmd *cobra.Command, args []string, ou
 	}
 
 	// Note we perform as much validation as we can, before writing a bad config
-	_, err = clientset.InstanceGroups(cluster.Name).Update(fullGroup)
+	_, err = clientset.InstanceGroups(cluster.ObjectMeta.Name).Update(fullGroup)
 	if err != nil {
 		return err
 	}

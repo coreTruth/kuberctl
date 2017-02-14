@@ -18,20 +18,31 @@ package cloudup
 
 import (
 	"fmt"
+	"strings"
+	"testing"
+
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kubernetes/pkg/util/sets"
-	"strings"
-	"testing"
 )
 
 func buildMinimalCluster() *api.Cluster {
 	c := &api.Cluster{}
-	c.Name = "testcluster.test.com"
-	c.Spec.Zones = []*api.ClusterZoneSpec{
-		{Name: "us-mock-1a", CIDR: "172.20.1.0/24"},
-		{Name: "us-mock-1b", CIDR: "172.20.2.0/24"},
-		{Name: "us-mock-1c", CIDR: "172.20.3.0/24"},
+	c.ObjectMeta.Name = "testcluster.test.com"
+	c.Spec.KubernetesVersion = "1.4.6"
+	c.Spec.Subnets = []api.ClusterSubnetSpec{
+		{Name: "subnet-us-mock-1a", Zone: "us-mock-1a", CIDR: "172.20.1.0/24"},
+		{Name: "subnet-us-mock-1b", Zone: "us-mock-1b", CIDR: "172.20.2.0/24"},
+		{Name: "subnet-us-mock-1c", Zone: "us-mock-1c", CIDR: "172.20.3.0/24"},
+	}
+
+	c.Spec.KubernetesAPIAccess = []string{"0.0.0.0/0"}
+	c.Spec.SSHAccess = []string{"0.0.0.0/0"}
+
+	// Default to public topology
+	c.Spec.Topology = &api.TopologySpec{
+		Masters: api.TopologyPublic,
+		Nodes:   api.TopologyPublic,
 	}
 	c.Spec.NetworkCIDR = "172.20.0.0/16"
 	c.Spec.NonMasqueradeCIDR = "100.64.0.0/10"
@@ -47,11 +58,11 @@ func buildMinimalCluster() *api.Cluster {
 }
 
 func addEtcdClusters(c *api.Cluster) {
-	zones := sets.NewString()
-	for _, z := range c.Spec.Zones {
-		zones.Insert(z.Name)
+	subnetNames := sets.NewString()
+	for _, z := range c.Spec.Subnets {
+		subnetNames.Insert(z.Name)
 	}
-	etcdZones := zones.List()
+	etcdZones := subnetNames.List()
 
 	for _, etcdCluster := range EtcdClusters {
 		etcd := &api.EtcdClusterSpec{}
@@ -59,7 +70,7 @@ func addEtcdClusters(c *api.Cluster) {
 		for _, zone := range etcdZones {
 			m := &api.EtcdMemberSpec{}
 			m.Name = zone
-			m.Zone = fi.String(zone)
+			m.InstanceGroup = fi.String(zone)
 			etcd.Members = append(etcd.Members, m)
 		}
 		c.Spec.EtcdClusters = append(c.Spec.EtcdClusters, etcd)
@@ -69,7 +80,7 @@ func addEtcdClusters(c *api.Cluster) {
 func TestPopulateCluster_Default_NoError(t *testing.T) {
 	c := buildMinimalCluster()
 
-	err := c.PerformAssignments()
+	err := PerformAssignments(c)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
@@ -85,11 +96,11 @@ func TestPopulateCluster_Default_NoError(t *testing.T) {
 func TestPopulateCluster_Docker_Spec(t *testing.T) {
 	c := buildMinimalCluster()
 	c.Spec.Docker = &api.DockerConfig{
-		MTU:              fi.Int(5678),
+		MTU:              fi.Int32(5678),
 		InsecureRegistry: fi.String("myregistry.com:1234"),
 	}
 
-	err := c.PerformAssignments()
+	err := PerformAssignments(c)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
@@ -101,7 +112,7 @@ func TestPopulateCluster_Docker_Spec(t *testing.T) {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
 
-	if fi.IntValue(full.Spec.Docker.MTU) != 5678 {
+	if fi.Int32Value(full.Spec.Docker.MTU) != 5678 {
 		t.Fatalf("Unexpected Docker MTU: %v", full.Spec.Docker.MTU)
 	}
 
@@ -110,8 +121,26 @@ func TestPopulateCluster_Docker_Spec(t *testing.T) {
 	}
 }
 
+func TestPopulateCluster_StorageDefault(t *testing.T) {
+	c := buildMinimalCluster()
+	err := PerformAssignments(c)
+	if err != nil {
+		t.Fatalf("error from PerformAssignments: %v", err)
+	}
+
+	addEtcdClusters(c)
+	full, err := PopulateClusterSpec(c)
+	if err != nil {
+		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
+	}
+
+	if fi.StringValue(full.Spec.KubeAPIServer.StorageBackend) != "etcd2" {
+		t.Fatalf("Unexpected StorageBackend: %v", full.Spec.KubeAPIServer.StorageBackend)
+	}
+}
+
 func build(c *api.Cluster) (*api.Cluster, error) {
-	err := c.PerformAssignments()
+	err := PerformAssignments(c)
 	if err != nil {
 		return nil, fmt.Errorf("error from PerformAssignments: %v", err)
 	}
@@ -180,13 +209,13 @@ func TestPopulateCluster_CNI(t *testing.T) {
 func TestPopulateCluster_Custom_CIDR(t *testing.T) {
 	c := buildMinimalCluster()
 	c.Spec.NetworkCIDR = "172.20.2.0/24"
-	c.Spec.Zones = []*api.ClusterZoneSpec{
-		{Name: "us-mock-1a", CIDR: "172.20.2.0/27"},
-		{Name: "us-mock-1b", CIDR: "172.20.2.32/27"},
-		{Name: "us-mock-1c", CIDR: "172.20.2.64/27"},
+	c.Spec.Subnets = []api.ClusterSubnetSpec{
+		{Name: "subnet-us-mock-1a", Zone: "us-mock-1a", CIDR: "172.20.2.0/27"},
+		{Name: "subnet-us-mock-1b", Zone: "us-mock-1b", CIDR: "172.20.2.32/27"},
+		{Name: "subnet-us-mock-1c", Zone: "us-mock-1c", CIDR: "172.20.2.64/27"},
 	}
 
-	err := c.PerformAssignments()
+	err := PerformAssignments(c)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
@@ -206,7 +235,7 @@ func TestPopulateCluster_IsolateMasters(t *testing.T) {
 	c := buildMinimalCluster()
 	c.Spec.IsolateMasters = fi.Bool(true)
 
-	err := c.PerformAssignments()
+	err := PerformAssignments(c)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
@@ -229,7 +258,7 @@ func TestPopulateCluster_IsolateMastersFalse(t *testing.T) {
 	c := buildMinimalCluster()
 	// default: c.Spec.IsolateMasters = fi.Bool(false)
 
-	err := c.PerformAssignments()
+	err := PerformAssignments(c)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
@@ -250,16 +279,16 @@ func TestPopulateCluster_IsolateMastersFalse(t *testing.T) {
 
 func TestPopulateCluster_Name_Required(t *testing.T) {
 	c := buildMinimalCluster()
-	c.Name = ""
+	c.ObjectMeta.Name = ""
 
 	expectErrorFromPopulateCluster(t, c, "Name")
 }
 
 func TestPopulateCluster_Zone_Required(t *testing.T) {
 	c := buildMinimalCluster()
-	c.Spec.Zones = nil
+	c.Spec.Subnets = nil
 
-	expectErrorFromPopulateCluster(t, c, "Zone")
+	expectErrorFromPopulateCluster(t, c, "Subnet")
 }
 
 func TestPopulateCluster_NetworkCIDR_Required(t *testing.T) {
@@ -283,6 +312,49 @@ func TestPopulateCluster_CloudProvider_Required(t *testing.T) {
 	expectErrorFromPopulateCluster(t, c, "CloudProvider")
 }
 
+func TestPopulateCluster_TopologyInvalidNil_Required(t *testing.T) {
+	c := buildMinimalCluster()
+	c.Spec.Topology.Masters = ""
+	c.Spec.Topology.Nodes = ""
+	expectErrorFromPopulateCluster(t, c, "Topology")
+}
+
+func TestPopulateCluster_TopologyInvalidValue_Required(t *testing.T) {
+	c := buildMinimalCluster()
+	c.Spec.Topology.Masters = "123"
+	c.Spec.Topology.Nodes = "abc"
+	expectErrorFromPopulateCluster(t, c, "Topology")
+}
+
+//func TestPopulateCluster_TopologyInvalidMatchingValues_Required(t *testing.T) {
+//	// We can't have a bastion with public masters / nodes
+//	c := buildMinimalCluster()
+//	c.Spec.Topology.Masters = api.TopologyPublic
+//	c.Spec.Topology.Nodes = api.TopologyPrivate
+//	expectErrorFromPopulateCluster(t, c, "Topology")
+//}
+
+func TestPopulateCluster_BastionInvalidMatchingValues_Required(t *testing.T) {
+	// We can't have a bastion with public masters / nodes
+	c := buildMinimalCluster()
+	addEtcdClusters(c)
+	c.Spec.Topology.Masters = api.TopologyPublic
+	c.Spec.Topology.Nodes = api.TopologyPublic
+	c.Spec.Topology.Bastion = &api.BastionSpec{}
+	expectErrorFromPopulateCluster(t, c, "Bastion")
+}
+
+func TestPopulateCluster_BastionIdleTimeoutInvalidNegative_Required(t *testing.T) {
+	c := buildMinimalCluster()
+	addEtcdClusters(c)
+
+	c.Spec.Topology.Masters = api.TopologyPrivate
+	c.Spec.Topology.Nodes = api.TopologyPrivate
+	c.Spec.Topology.Bastion = &api.BastionSpec{}
+	c.Spec.Topology.Bastion.IdleTimeoutSeconds = fi.Int64(-1)
+	expectErrorFromPopulateCluster(t, c, "Bastion")
+}
+
 func expectErrorFromPopulateCluster(t *testing.T, c *api.Cluster, message string) {
 	_, err := PopulateClusterSpec(c)
 	if err == nil {
@@ -291,5 +363,137 @@ func expectErrorFromPopulateCluster(t *testing.T, c *api.Cluster, message string
 	actualMessage := fmt.Sprintf("%v", err)
 	if !strings.Contains(actualMessage, message) {
 		t.Fatalf("Expected error %q, got %q", message, actualMessage)
+	}
+}
+
+func TestPopulateCluster_APIServerCount(t *testing.T) {
+	c := buildMinimalCluster()
+
+	full, err := build(c)
+	if err != nil {
+		t.Fatalf("error during build: %v", err)
+	}
+
+	if fi.Int32Value(full.Spec.KubeAPIServer.APIServerCount) != 3 {
+		t.Fatalf("Unexpected APIServerCount: %v", fi.Int32Value(full.Spec.KubeAPIServer.APIServerCount))
+	}
+}
+
+func TestPopulateCluster_AnonymousAuth(t *testing.T) {
+	c := buildMinimalCluster()
+	c.Spec.KubernetesVersion = "1.5.0"
+
+	err := PerformAssignments(c)
+	if err != nil {
+		t.Fatalf("error from PerformAssignments: %v", err)
+	}
+
+	addEtcdClusters(c)
+
+	full, err := PopulateClusterSpec(c)
+	if err != nil {
+		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
+	}
+
+	if full.Spec.KubeAPIServer.AnonymousAuth == nil {
+		t.Fatalf("AnonymousAuth not specified")
+	}
+
+	if fi.BoolValue(full.Spec.KubeAPIServer.AnonymousAuth) != false {
+		t.Fatalf("Unexpected AnonymousAuth: %v", fi.BoolValue(full.Spec.KubeAPIServer.AnonymousAuth))
+	}
+}
+
+func TestPopulateCluster_AnonymousAuth_14(t *testing.T) {
+	c := buildMinimalCluster()
+	c.Spec.KubernetesVersion = "1.4.0"
+
+	err := PerformAssignments(c)
+	if err != nil {
+		t.Fatalf("error from PerformAssignments: %v", err)
+	}
+
+	addEtcdClusters(c)
+
+	full, err := PopulateClusterSpec(c)
+	if err != nil {
+		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
+	}
+
+	if full.Spec.KubeAPIServer.AnonymousAuth != nil {
+		t.Fatalf("AnonymousAuth is not supported in 1.4")
+	}
+}
+
+func TestPopulateCluster_DockerVersion(t *testing.T) {
+	grid := []struct {
+		KubernetesVersion string
+		DockerVersion     string
+	}{
+		{
+			KubernetesVersion: "1.4.6",
+			DockerVersion:     "1.11.2",
+		},
+		{
+			KubernetesVersion: "1.5.1",
+			DockerVersion:     "1.12.3",
+		},
+	}
+
+	for _, test := range grid {
+		c := buildMinimalCluster()
+		c.Spec.KubernetesVersion = test.KubernetesVersion
+
+		full, err := build(c)
+		if err != nil {
+			t.Fatalf("error during build: %v", err)
+		}
+
+		if fi.StringValue(full.Spec.Docker.Version) != test.DockerVersion {
+			t.Fatalf("Unexpected DockerVersion: %v", fi.StringValue(full.Spec.Docker.Version))
+		}
+	}
+}
+
+func TestPopulateCluster_KubeController_High_Enough_Version(t *testing.T) {
+	c := buildMinimalCluster()
+	c.Spec.KubernetesVersion = "v1.5.2"
+
+	err := PerformAssignments(c)
+	if err != nil {
+		t.Fatalf("error from PerformAssignments: %v", err)
+	}
+
+	addEtcdClusters(c)
+
+	full, err := PopulateClusterSpec(c)
+	if err != nil {
+		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
+	}
+
+	if full.Spec.KubeControllerManager.AttachDetachReconcileSyncPeriod == nil {
+		t.Fatalf("AttachDetachReconcileSyncPeriod not set correctly")
+	}
+
+}
+
+func TestPopulateCluster_KubeController_Fail(t *testing.T) {
+	c := buildMinimalCluster()
+	c.Spec.KubernetesVersion = "1.4.7"
+
+	err := PerformAssignments(c)
+	if err != nil {
+		t.Fatalf("error from PerformAssignments: %v", err)
+	}
+
+	addEtcdClusters(c)
+
+	full, err := PopulateClusterSpec(c)
+	if err != nil {
+		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
+	}
+
+	if full.Spec.KubeControllerManager.AttachDetachReconcileSyncPeriod != nil {
+		t.Fatalf("AttachDetachReconcileSyncPeriodh is not supported in 1.4.7")
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/labels"
 )
 
@@ -46,8 +47,8 @@ func ApplyMasterTaints(kubeContext *KubernetesContext) error {
 		return err
 	}
 
-	options := api.ListOptions{
-		LabelSelector: labels.SelectorFromSet(labels.Set{"kubernetes.io/role": "master"}),
+	options := v1.ListOptions{
+		LabelSelector: labels.SelectorFromSet(labels.Set{"kubernetes.io/role": "master"}).String(),
 	}
 	glog.V(2).Infof("Querying k8s for nodes with selector %q", options.LabelSelector)
 	nodes, err := client.Core().Nodes().List(options)
@@ -55,7 +56,7 @@ func ApplyMasterTaints(kubeContext *KubernetesContext) error {
 		return fmt.Errorf("error querying nodes: %v", err)
 	}
 
-	taint := []api.Taint{{Key: "dedicated", Value: "master", Effect: "NoSchedule"}}
+	taint := []v1.Taint{{Key: "dedicated", Value: "master", Effect: "NoSchedule"}}
 	taintJSON, err := json.Marshal(taint)
 	if err != nil {
 		return fmt.Errorf("error serializing taint: %v", err)
@@ -64,7 +65,7 @@ func ApplyMasterTaints(kubeContext *KubernetesContext) error {
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
 
-		nodeTaintJSON := node.Annotations[api.TaintsAnnotationKey]
+		nodeTaintJSON := node.Annotations[v1.TaintsAnnotationKey]
 		if nodeTaintJSON != "" {
 			if nodeTaintJSON != string(taintJSON) {
 				glog.Infof("Node %q had unexpected taint: %v", node.Name, nodeTaintJSON)
@@ -73,7 +74,7 @@ func ApplyMasterTaints(kubeContext *KubernetesContext) error {
 		}
 
 		nodePatchMetadata := &nodePatchMetadata{
-			Annotations: map[string]string{api.TaintsAnnotationKey: string(taintJSON)},
+			Annotations: map[string]string{v1.TaintsAnnotationKey: string(taintJSON)},
 		}
 		unschedulable := false
 		nodePatchSpec := &nodePatchSpec{

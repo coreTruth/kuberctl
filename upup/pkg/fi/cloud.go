@@ -27,6 +27,23 @@ type Cloud interface {
 	ProviderID() CloudProviderID
 
 	DNS() (dnsprovider.Interface, error)
+
+	// FindVPCInfo looks up the specified VPC by id, returning info if found, otherwise (nil, nil)
+	FindVPCInfo(id string) (*VPCInfo, error)
+}
+
+type VPCInfo struct {
+	// CIDR is the IP address range for the VPC
+	CIDR string
+
+	// Subnets is a list of subnets that are part of the VPC
+	Subnets []*SubnetInfo
+}
+
+type SubnetInfo struct {
+	ID   string
+	Zone string
+	CIDR string
 }
 
 // zonesToCloud allows us to infer from certain well-known zones to a cloud
@@ -55,6 +72,9 @@ var zonesToCloud = map[string]CloudProviderID{
 	"us-west-2c": CloudProviderAWS,
 	"us-west-2d": CloudProviderAWS,
 	"us-west-2e": CloudProviderAWS,
+
+	"ca-central-1a": CloudProviderAWS,
+	"ca-central-1b": CloudProviderAWS,
 
 	"eu-west-1a": CloudProviderAWS,
 	"eu-west-1b": CloudProviderAWS,
@@ -103,6 +123,9 @@ var zonesToCloud = map[string]CloudProviderID{
 	"sa-east-1c": CloudProviderAWS,
 	"sa-east-1d": CloudProviderAWS,
 	"sa-east-1e": CloudProviderAWS,
+
+	"cn-north-1a": CloudProviderAWS,
+	"cn-north-1b": CloudProviderAWS,
 }
 
 // GuessCloudForZone tries to infer the cloudprovider from the zone name

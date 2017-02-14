@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"github.com/golang/glog"
 	api "k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/apis/kops/validation"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kubernetes/pkg/util/sets"
@@ -30,17 +31,19 @@ import (
 const MockAWSRegion = "us-mock-1"
 
 func buildDefaultCluster(t *testing.T) *api.Cluster {
+	awsup.InstallMockAWSCloud(MockAWSRegion, "abcd")
+
 	c := buildMinimalCluster()
 
-	err := c.PerformAssignments()
+	err := PerformAssignments(c)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
 
 	if len(c.Spec.EtcdClusters) == 0 {
 		zones := sets.NewString()
-		for _, z := range c.Spec.Zones {
-			zones.Insert(z.Name)
+		for _, z := range c.Spec.Subnets {
+			zones.Insert(z.Zone)
 		}
 		etcdZones := zones.List()
 
@@ -50,14 +53,12 @@ func buildDefaultCluster(t *testing.T) *api.Cluster {
 			for _, zone := range etcdZones {
 				m := &api.EtcdMemberSpec{}
 				m.Name = zone
-				m.Zone = fi.String(zone)
+				m.InstanceGroup = fi.String(zone)
 				etcd.Members = append(etcd.Members, m)
 			}
 			c.Spec.EtcdClusters = append(c.Spec.EtcdClusters, etcd)
 		}
 	}
-
-	awsup.InstallMockAWSCloud(MockAWSRegion, "abcd")
 
 	fullSpec, err := PopulateClusterSpec(c)
 	if err != nil {
@@ -105,12 +106,12 @@ func buildDefaultCluster(t *testing.T) *api.Cluster {
 
 func TestValidateFull_Default_Validates(t *testing.T) {
 	c := buildDefaultCluster(t)
-	err := c.Validate(false)
+	err := validation.ValidateCluster(c, false)
 	if err != nil {
 		glog.Infof("Cluster: %v", c)
 		t.Fatalf("Validate gave unexpected error (strict=false): %v", err)
 	}
-	err = c.Validate(true)
+	err = validation.ValidateCluster(c, true)
 	if err != nil {
 		t.Fatalf("Validate gave unexpected error (strict=true): %v", err)
 	}
@@ -118,19 +119,19 @@ func TestValidateFull_Default_Validates(t *testing.T) {
 
 func TestValidateFull_ClusterName_InvalidDNS_NoDot(t *testing.T) {
 	c := buildDefaultCluster(t)
-	c.Name = "test"
+	c.ObjectMeta.Name = "test"
 	expectErrorFromValidate(t, c, "DNS name")
 }
 
 func TestValidateFull_ClusterName_InvalidDNS_Invalid(t *testing.T) {
 	c := buildDefaultCluster(t)
-	c.Name = "test.-"
+	c.ObjectMeta.Name = "test.-"
 	expectErrorFromValidate(t, c, "DNS name")
 }
 
 func TestValidateFull_ClusterName_Required(t *testing.T) {
 	c := buildDefaultCluster(t)
-	c.Name = ""
+	c.ObjectMeta.Name = ""
 	expectErrorFromValidate(t, c, "Name")
 }
 
@@ -170,15 +171,15 @@ func TestValidate_ClusterName_Import(t *testing.T) {
 	c := buildDefaultCluster(t)
 
 	// When we import a cluster, it likely won't have a valid name until we convert it
-	c.Annotations = make(map[string]string)
-	c.Annotations[api.AnnotationNameManagement] = api.AnnotationValueManagementImported
-	c.Name = "kubernetes"
+	c.ObjectMeta.Annotations = make(map[string]string)
+	c.ObjectMeta.Annotations[api.AnnotationNameManagement] = api.AnnotationValueManagementImported
+	c.ObjectMeta.Name = "kubernetes"
 
 	expectNoErrorFromValidate(t, c)
 }
 
 func expectErrorFromValidate(t *testing.T, c *api.Cluster, message string) {
-	err := c.Validate(false)
+	err := validation.ValidateCluster(c, false)
 	if err == nil {
 		t.Fatalf("Expected error from Validate")
 	}
@@ -189,7 +190,7 @@ func expectErrorFromValidate(t *testing.T, c *api.Cluster, message string) {
 }
 
 func expectNoErrorFromValidate(t *testing.T, c *api.Cluster) {
-	err := c.Validate(false)
+	err := validation.ValidateCluster(c, false)
 	if err != nil {
 		t.Fatalf("Unexpected error from Validate: %v", err)
 	}

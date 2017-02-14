@@ -18,14 +18,16 @@ package kutil
 
 import (
 	"fmt"
-	"github.com/golang/glog"
 	"io/ioutil"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
 	"os"
 	"os/exec"
 	"path"
 	"strings"
+
+	"github.com/golang/glog"
+	"k8s.io/kubernetes/pkg/client/restclient"
+	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
+	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
 )
 
 // KubeconfigBuilder builds a kubecfg file
@@ -48,18 +50,65 @@ type KubeconfigBuilder struct {
 	ClientKey  []byte
 }
 
+const KUBE_CFG_ENV = clientcmd.RecommendedConfigPathEnvVar + "=%s"
+
+// Create new KubeconfigBuilder
 func NewKubeconfigBuilder() *KubeconfigBuilder {
 	c := &KubeconfigBuilder{}
 	c.KubectlPath = "kubectl" // default to in-path
-
-	kubeconfig := os.Getenv(clientcmd.RecommendedConfigPathEnvVar)
-	if kubeconfig == "" {
-		kubeconfig = clientcmd.RecommendedHomeFile
-	}
-	c.KubeconfigPath = kubeconfig
+	kubeConfig := os.Getenv(clientcmd.RecommendedConfigPathEnvVar)
+	c.KubeconfigPath = c.getKubectlPath(kubeConfig)
 	return c
 }
 
+func DeleteConfig(name string) error {
+	filename := clientcmd.NewDefaultClientConfigLoadingRules().GetDefaultFilename()
+	config, err := clientcmd.LoadFromFile(filename)
+	if err != nil {
+		return fmt.Errorf("error loading kube config: %v", err)
+	}
+
+	if api.IsConfigEmpty(config) {
+		return fmt.Errorf("kube config is empty")
+	}
+
+	_, ok := config.Clusters[name]
+	if !ok {
+		return fmt.Errorf("cluster %s does not exist", name)
+	}
+	delete(config.Clusters, name)
+
+	_, ok = config.AuthInfos[name]
+	if !ok {
+		return fmt.Errorf("user %s does not exist", name)
+	}
+	delete(config.AuthInfos, name)
+
+	_, ok = config.AuthInfos[fmt.Sprintf("%s-basic-auth", name)]
+	if !ok {
+		return fmt.Errorf("user %s-basic-auth does not exist", name)
+	}
+	delete(config.AuthInfos, fmt.Sprintf("%s-basic-auth", name))
+
+	_, ok = config.Contexts[name]
+	if !ok {
+		return fmt.Errorf("context %s does not exist", name)
+	}
+	delete(config.Contexts, name)
+
+	if config.CurrentContext == name {
+		config.CurrentContext = ""
+	}
+
+	err = clientcmd.WriteToFile(*config, filename)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Create new Rest Client
 func (c *KubeconfigBuilder) BuildRestConfig() (*restclient.Config, error) {
 	restConfig := &restclient.Config{
 		Host: "https://" + c.KubeMasterIP,
@@ -79,6 +128,7 @@ func (c *KubeconfigBuilder) BuildRestConfig() (*restclient.Config, error) {
 	return restConfig, nil
 }
 
+// Write out a new kubeconfig
 func (c *KubeconfigBuilder) WriteKubecfg() error {
 	tmpdir, err := ioutil.TempDir("", "k8s")
 	if err != nil {
@@ -183,20 +233,45 @@ func (c *KubeconfigBuilder) WriteKubecfg() error {
 			return err
 		}
 	}
-
-	split := strings.Split(c.KubeconfigPath, ":")
-	path := c.KubeconfigPath
-	if len(split) > 1 {
-		path = split[0]
-	}
-	fmt.Printf("Wrote config for %s to %q\n", c.Context, path)
+	fmt.Printf("Wrote config for %s to %q\n", c.Context, c.KubeconfigPath)
+	fmt.Printf("Kops has set your kubectl context to %s\n", c.Context)
 	return nil
+}
+
+func (c *KubeconfigBuilder) DeleteKubeConfig() {
+	c.execKubectl("config", "unset", fmt.Sprintf("clusters.%s", c.Context))
+	c.execKubectl("config", "unset", fmt.Sprintf("users.%s", c.Context))
+	c.execKubectl("config", "unset", fmt.Sprintf("users.%s-basic-auth", c.Context))
+	c.execKubectl("config", "unset", fmt.Sprintf("contexts.%s", c.Context))
+	config, err := clientcmd.LoadFromFile(c.KubeconfigPath)
+	if err != nil {
+		fmt.Printf("kubectl unset current-context failed: %v", err)
+	}
+	if config.CurrentContext == c.Context {
+		c.execKubectl("config", "unset", "current-context")
+	}
+	fmt.Printf("Deleted kubectl config for %s\n", c.Context)
+}
+
+// get the correct path.  Handle empty and multiple values.
+func (c *KubeconfigBuilder) getKubectlPath(kubeConfig string) string {
+
+	if kubeConfig == "" {
+		return clientcmd.RecommendedHomeFile
+	}
+
+	split := strings.Split(kubeConfig, ":")
+	if len(split) > 1 {
+		return split[0]
+	}
+
+	return kubeConfig
 }
 
 func (c *KubeconfigBuilder) execKubectl(args ...string) error {
 	cmd := exec.Command(c.KubectlPath, args...)
 	env := os.Environ()
-	env = append(env, fmt.Sprintf("KUBECONFIG=%s", c.KubeconfigPath))
+	env = append(env, fmt.Sprintf(KUBE_CFG_ENV, c.KubeconfigPath))
 	cmd.Env = env
 
 	glog.V(2).Infof("Running command: %s", strings.Join(cmd.Args, " "))

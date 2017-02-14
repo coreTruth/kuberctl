@@ -36,6 +36,8 @@ func IsNilOrEmpty(s *string) bool {
 	return *s == ""
 }
 
+// String is a helper that builds a *string from a string value
+// This is similar to aws.String, except that we use it for non-AWS values
 func String(s string) *string {
 	return &s
 }
@@ -51,17 +53,19 @@ func BoolValue(v *bool) bool {
 	return *v
 }
 
-func Int(v int) *int {
+func Int32(v int32) *int32 {
 	return &v
 }
 
-func IntValue(v *int) int {
+func Int32Value(v *int32) int32 {
 	if v == nil {
 		return 0
 	}
 	return *v
 }
 
+// Int64 is a helper that builds a *int64 from an int64 value
+// This is similar to aws.Int64, except that we use it for non-AWS values
 func Int64(v int64) *int64 {
 	return &v
 }

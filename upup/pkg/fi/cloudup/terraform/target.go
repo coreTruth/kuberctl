@@ -84,8 +84,13 @@ func (t *TerraformTarget) AddFile(resourceType string, resourceName string, key 
 	p := path.Join("data", id)
 	t.files[p] = d
 
-	l := LiteralExpression(fmt.Sprintf("${file(%q)}", p))
+	l := LiteralExpression(fmt.Sprintf("${file(%q)}", path.Join("${path.module}", p)))
 	return l, nil
+}
+
+func (t *TerraformTarget) ProcessDeletions() bool {
+	// Terraform tracks & performs deletions itself
+	return false
 }
 
 func (t *TerraformTarget) RenderResource(resourceType string, resourceName string, e interface{}) error {

@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/autoscaling"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/golang/glog"
+	"k8s.io/kops"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/registry"
 	"k8s.io/kops/pkg/client/simple"
@@ -72,7 +73,7 @@ func (x *ConvertKubeupCluster) Upgrade() error {
 	newTags["KubernetesCluster"] = newClusterName
 
 	// Build completed cluster (force errors asap)
-	cluster.Name = newClusterName
+	cluster.ObjectMeta.Name = newClusterName
 
 	newConfigBase, err := x.Clientset.Clusters().(*vfsclientset.ClusterVFS).ConfigBase(newClusterName)
 	if err != nil {
@@ -86,18 +87,21 @@ func (x *ConvertKubeupCluster) Upgrade() error {
 	}
 
 	// Set KubernetesVersion from channel
-	if x.Channel != nil && x.Channel.Spec.Cluster != nil && x.Channel.Spec.Cluster.KubernetesVersion != "" {
-		cluster.Spec.KubernetesVersion = x.Channel.Spec.Cluster.KubernetesVersion
+	if x.Channel != nil {
+		kubernetesVersion := api.RecommendedKubernetesVersion(x.Channel, kops.Version)
+		if kubernetesVersion != nil {
+			cluster.Spec.KubernetesVersion = kubernetesVersion.String()
+		}
 	}
 
-	err = cluster.PerformAssignments()
+	err = cloudup.PerformAssignments(cluster)
 	if err != nil {
 		return fmt.Errorf("error populating cluster defaults: %v", err)
 	}
 
-	if cluster.Annotations != nil {
+	if cluster.ObjectMeta.Annotations != nil {
 		// Remove the management annotation for the new cluster
-		delete(cluster.Annotations, api.AnnotationNameManagement)
+		delete(cluster.ObjectMeta.Annotations, api.AnnotationNameManagement)
 	}
 
 	fullCluster, err := cloudup.PopulateClusterSpec(cluster)
@@ -463,7 +467,8 @@ func (x *ConvertKubeupCluster) Upgrade() error {
 		return fmt.Errorf("error writing updated configuration: %v", err)
 	}
 
-	err = registry.WriteConfig(newConfigBase.Join(registry.PathClusterCompleted), fullCluster)
+	// TODO: No longer needed?
+	err = registry.WriteConfigDeprecated(newConfigBase.Join(registry.PathClusterCompleted), fullCluster)
 	if err != nil {
 		return fmt.Errorf("error writing completed cluster spec: %v", err)
 	}

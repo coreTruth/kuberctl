@@ -18,24 +18,30 @@ package nodeup
 
 import (
 	"fmt"
-	"github.com/golang/glog"
 	"io"
 	"io/ioutil"
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/golang/glog"
+	"k8s.io/kops/nodeup/pkg/distros"
+	"k8s.io/kops/nodeup/pkg/model"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/registry"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/cloudinit"
 	"k8s.io/kops/upup/pkg/fi/nodeup/local"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
+	"k8s.io/kops/upup/pkg/fi/nodeup/tags"
 	"k8s.io/kops/upup/pkg/fi/utils"
 	"k8s.io/kops/util/pkg/vfs"
-	"os/exec"
-	"strconv"
-	"strings"
+	"k8s.io/kubernetes/pkg/util/sets"
 )
 
 // We should probably retry for a long time - there is not really any great fallback
-const MaxAttemptsWithNoProgress = 100
+const MaxTaskDuration = 365 * 24 * time.Hour
 
 type NodeUpCommand struct {
 	config         *NodeUpConfig
@@ -123,7 +129,7 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 
 		err = utils.YamlUnmarshal(b, c.cluster)
 		if err != nil {
-			return fmt.Errorf("error parsing Cluster %q: %v", clusterLocation, err)
+			return fmt.Errorf("error parsing Cluster %q: %v", p, err)
 		}
 	}
 
@@ -169,28 +175,47 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 	//	c.Config.Tags = append(c.Config.Tags, "_not_config_store")
 	//}
 
-	osTags, err := FindOSTags(c.FSRoot)
+	distribution, err := distros.FindDistribution(c.FSRoot)
 	if err != nil {
-		return fmt.Errorf("error determining OS tags: %v", err)
+		return fmt.Errorf("error determining OS distribution: %v", err)
 	}
 
-	tags := make(map[string]struct{})
-	for _, tag := range osTags {
-		tags[tag] = struct{}{}
-	}
-	for _, tag := range c.config.Tags {
-		tags[tag] = struct{}{}
-	}
+	osTags := distribution.BuildTags()
+
+	nodeTags := sets.NewString()
+	nodeTags.Insert(osTags...)
+	nodeTags.Insert(c.config.Tags...)
 
 	glog.Infof("Config tags: %v", c.config.Tags)
 	glog.Infof("OS tags: %v", osTags)
 
-	loader := NewLoader(c.config, c.cluster, assets, tags)
-
-	tf, err := newTemplateFunctions(c.config, c.cluster, c.instanceGroup, tags)
+	tf, err := newTemplateFunctions(c.config, c.cluster, c.instanceGroup, nodeTags)
 	if err != nil {
 		return fmt.Errorf("error initializing: %v", err)
 	}
+
+	modelContext := &model.NodeupModelContext{
+		Cluster:       c.cluster,
+		Distribution:  distribution,
+		Architecture:  model.ArchitectureAmd64,
+		InstanceGroup: c.instanceGroup,
+		IsMaster:      nodeTags.Has(TagMaster),
+		UsesCNI:       nodeTags.Has(tags.TagCNI),
+		Assets:        assets,
+		KeyStore:      tf.keyStore,
+		SecretStore:   tf.secretStore,
+	}
+
+	loader := NewLoader(c.config, c.cluster, assets, nodeTags)
+	loader.Builders = append(loader.Builders, &model.DockerBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.KubeletBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.KubectlBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.EtcdBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.LogrotateBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.SysctlBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.KubeAPIServerBuilder{NodeupModelContext: modelContext})
+	loader.Builders = append(loader.Builders, &model.KubeControllerManagerBuilder{NodeupModelContext: modelContext})
+
 	tf.populate(loader.TemplateFunctions)
 
 	taskMap, err := loader.Build(c.ModelDir)
@@ -204,6 +229,12 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 			Hash:   image.Hash,
 		}
 	}
+	if c.config.ProtokubeImage != nil {
+		taskMap["LoadImage.protokube"] = &nodetasks.LoadImageTask{
+			Source: c.config.ProtokubeImage.Source,
+			Hash:   c.config.ProtokubeImage.Hash,
+		}
+	}
 
 	var cloud fi.Cloud
 	var keyStore fi.Keystore
@@ -215,13 +246,13 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 	case "direct":
 		target = &local.LocalTarget{
 			CacheDir: c.CacheDir,
-			Tags:     tags,
+			Tags:     nodeTags,
 		}
 	case "dryrun":
 		target = fi.NewDryRunTarget(out)
 	case "cloudinit":
 		checkExisting = false
-		target = cloudinit.NewCloudInitTarget(out, tags)
+		target = cloudinit.NewCloudInitTarget(out, nodeTags)
 	default:
 		return fmt.Errorf("unsupported target type %q", c.Target)
 	}
@@ -232,7 +263,7 @@ func (c *NodeUpCommand) Run(out io.Writer) error {
 	}
 	defer context.Close()
 
-	err = context.RunTasks(MaxAttemptsWithNoProgress)
+	err = context.RunTasks(MaxTaskDuration)
 	if err != nil {
 		glog.Exitf("error running tasks: %v", err)
 	}

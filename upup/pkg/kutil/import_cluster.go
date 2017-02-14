@@ -52,17 +52,20 @@ func (x *ImportCluster) ImportAWSCluster() error {
 	var instanceGroups []*api.InstanceGroup
 
 	cluster := &api.Cluster{}
-	cluster.Annotations = make(map[string]string)
+	cluster.ObjectMeta.Annotations = make(map[string]string)
 
 	// This annotation relaxes some validation (e.g. cluster name as full-dns name)
-	cluster.Annotations[api.AnnotationNameManagement] = api.AnnotationValueManagementImported
+	cluster.ObjectMeta.Annotations[api.AnnotationNameManagement] = api.AnnotationValueManagementImported
 
 	cluster.Spec.CloudProvider = string(fi.CloudProviderAWS)
-	cluster.Name = clusterName
+	cluster.ObjectMeta.Name = clusterName
 
 	cluster.Spec.KubeControllerManager = &api.KubeControllerManagerConfig{}
 
 	cluster.Spec.Channel = api.DefaultChannel
+
+	cluster.Spec.KubernetesAPIAccess = []string{"0.0.0.0/0"}
+	cluster.Spec.SSHAccess = []string{"0.0.0.0/0"}
 
 	configBase, err := x.Clientset.Clusters().(*vfsclientset.ClusterVFS).ConfigBase(clusterName)
 	if err != nil {
@@ -75,34 +78,35 @@ func (x *ImportCluster) ImportAWSCluster() error {
 		return err
 	}
 
-	masterGroup := &api.InstanceGroup{}
-	masterGroup.Spec.Role = api.InstanceGroupRoleMaster
-	masterGroup.Spec.MinSize = fi.Int(1)
-	masterGroup.Spec.MaxSize = fi.Int(1)
-	instanceGroups = append(instanceGroups, masterGroup)
-
 	instances, err := findInstances(awsCloud)
 	if err != nil {
 		return fmt.Errorf("error finding instances: %v", err)
 	}
 
 	var masterInstance *ec2.Instance
-	zones := make(map[string]*api.ClusterZoneSpec)
+	subnets := make(map[string]*api.ClusterSubnetSpec)
 
 	for _, instance := range instances {
 		instanceState := aws.StringValue(instance.State.Name)
 
 		if instanceState != "terminated" && instance.Placement != nil {
 			zoneName := aws.StringValue(instance.Placement.AvailabilityZone)
-			zone := zones[zoneName]
-			if zone == nil {
-				zone = &api.ClusterZoneSpec{Name: zoneName}
-				zones[zoneName] = zone
+			// We name the subnet after the zone
+			subnetName := zoneName
+
+			subnet := subnets[subnetName]
+			if subnet == nil {
+				subnet = &api.ClusterSubnetSpec{
+					Name: subnetName,
+					Zone: zoneName,
+					Type: api.SubnetTypePublic,
+				}
+				subnets[subnetName] = subnet
 			}
 
-			subnet := aws.StringValue(instance.SubnetId)
-			if subnet != "" {
-				zone.ProviderID = subnet
+			subnetID := aws.StringValue(instance.SubnetId)
+			if subnetID != "" {
+				subnet.ProviderID = subnetID
 			}
 		}
 
@@ -131,20 +135,28 @@ func (x *ImportCluster) ImportAWSCluster() error {
 	masterInstanceID := aws.StringValue(masterInstance.InstanceId)
 	glog.Infof("Found master: %q", masterInstanceID)
 
+	masterGroup := &api.InstanceGroup{}
+	masterGroup.Spec.Role = api.InstanceGroupRoleMaster
+	masterGroup.Spec.MinSize = fi.Int32(1)
+	masterGroup.Spec.MaxSize = fi.Int32(1)
+
 	masterGroup.Spec.MachineType = aws.StringValue(masterInstance.InstanceType)
 
-	subnets, err := DescribeSubnets(x.Cloud)
+	masterInstanceGroups := []*api.InstanceGroup{masterGroup}
+	instanceGroups = append(instanceGroups, masterGroup)
+
+	awsSubnets, err := DescribeSubnets(x.Cloud)
 	if err != nil {
 		return fmt.Errorf("error finding subnets: %v", err)
 	}
 
-	for _, s := range subnets {
+	for _, s := range awsSubnets {
 		subnetID := aws.StringValue(s.SubnetId)
 
 		found := false
-		for _, zone := range zones {
-			if zone.ProviderID == subnetID {
-				zone.CIDR = aws.StringValue(s.CidrBlock)
+		for _, subnet := range subnets {
+			if subnet.ProviderID == subnetID {
+				subnet.CIDR = aws.StringValue(s.CidrBlock)
 				found = true
 			}
 		}
@@ -153,12 +165,13 @@ func (x *ImportCluster) ImportAWSCluster() error {
 			glog.Warningf("Ignoring subnet %q in which no instances were found", subnetID)
 		}
 	}
-	for k, zone := range zones {
-		if zone.ProviderID == "" {
+
+	for k, subnet := range subnets {
+		if subnet.ProviderID == "" {
 			return fmt.Errorf("cannot find subnet %q.  Please report this issue", k)
 		}
-		if zone.CIDR == "" {
-			return fmt.Errorf("cannot find subnet %q.  If you used an existing subnet, please tag it with %s=%s and retry the import", zone.ProviderID, awsup.TagClusterName, clusterName)
+		if subnet.CIDR == "" {
+			return fmt.Errorf("cannot find subnet %q.  If you used an existing subnet, please tag it with %s=%s and retry the import", subnet.ProviderID, awsup.TagClusterName, clusterName)
 		}
 	}
 
@@ -176,16 +189,16 @@ func (x *ImportCluster) ImportAWSCluster() error {
 
 	cluster.Spec.NetworkID = vpcID
 	cluster.Spec.NetworkCIDR = aws.StringValue(vpc.CidrBlock)
-	for _, zone := range zones {
-		cluster.Spec.Zones = append(cluster.Spec.Zones, zone)
+	for _, subnet := range subnets {
+		cluster.Spec.Subnets = append(cluster.Spec.Subnets, *subnet)
 	}
 
-	masterZone := zones[aws.StringValue(masterInstance.Placement.AvailabilityZone)]
-	if masterZone == nil {
-		return fmt.Errorf("cannot find zone %q for master.  Please report this issue", aws.StringValue(masterInstance.Placement.AvailabilityZone))
+	masterSubnet := subnets[aws.StringValue(masterInstance.Placement.AvailabilityZone)]
+	if masterSubnet == nil {
+		return fmt.Errorf("cannot find subnet %q for master.  Please report this issue", aws.StringValue(masterInstance.Placement.AvailabilityZone))
 	}
-	masterGroup.Spec.Zones = []string{masterZone.Name}
-	masterGroup.Name = "master-" + masterZone.Name
+	masterGroup.Spec.Subnets = []string{masterSubnet.Name}
+	masterGroup.ObjectMeta.Name = "master-" + masterSubnet.Name
 
 	userData, err := GetInstanceUserData(awsCloud, aws.StringValue(masterInstance.InstanceId))
 	if err != nil {
@@ -261,9 +274,9 @@ func (x *ImportCluster) ImportAWSCluster() error {
 
 	nodeGroup := &api.InstanceGroup{}
 	nodeGroup.Spec.Role = api.InstanceGroupRoleNode
-	nodeGroup.Name = "nodes"
-	for _, zone := range zones {
-		nodeGroup.Spec.Zones = append(nodeGroup.Spec.Zones, zone.Name)
+	nodeGroup.ObjectMeta.Name = "nodes"
+	for _, subnet := range subnets {
+		nodeGroup.Spec.Subnets = append(nodeGroup.Spec.Subnets, subnet.Name)
 	}
 	instanceGroups = append(instanceGroups, nodeGroup)
 
@@ -284,17 +297,17 @@ func (x *ImportCluster) ImportAWSCluster() error {
 		if len(groups) == 1 {
 			glog.Warningf("Multiple Autoscaling groups found")
 		}
-		minSize := 0
-		maxSize := 0
+		minSize := int32(0)
+		maxSize := int32(0)
 		for _, group := range groups {
-			minSize += int(aws.Int64Value(group.MinSize))
-			maxSize += int(aws.Int64Value(group.MaxSize))
+			minSize += int32(aws.Int64Value(group.MinSize))
+			maxSize += int32(aws.Int64Value(group.MaxSize))
 		}
 		if minSize != 0 {
-			nodeGroup.Spec.MinSize = fi.Int(minSize)
+			nodeGroup.Spec.MinSize = fi.Int32(minSize)
 		}
 		if maxSize != 0 {
-			nodeGroup.Spec.MaxSize = fi.Int(maxSize)
+			nodeGroup.Spec.MaxSize = fi.Int32(maxSize)
 		}
 
 		// Determine the machine type
@@ -342,12 +355,21 @@ func (x *ImportCluster) ImportAWSCluster() error {
 		etcdCluster := &api.EtcdClusterSpec{
 			Name: etcdClusterName,
 		}
-		for _, az := range masterGroup.Spec.Zones {
-			etcdCluster.Members = append(etcdCluster.Members, &api.EtcdMemberSpec{
-				Name: az,
-				Zone: fi.String(az),
-			})
+
+		for _, ig := range masterInstanceGroups {
+			member := &api.EtcdMemberSpec{
+				InstanceGroup: fi.String(ig.ObjectMeta.Name),
+			}
+
+			name := ig.ObjectMeta.Name
+			// We expect the IG to have a `master-` prefix, but this is both superfluous
+			// and not how we named things previously
+			name = strings.TrimPrefix(name, "master-")
+			member.Name = name
+
+			etcdCluster.Members = append(etcdCluster.Members, member)
 		}
+
 		cluster.Spec.EtcdClusters = append(cluster.Spec.EtcdClusters, etcdCluster)
 	}
 
@@ -686,20 +708,6 @@ func (u *UserDataConfiguration) ParseBool(key string) *bool {
 		return fi.Bool(true)
 	}
 	return fi.Bool(false)
-}
-
-func (u *UserDataConfiguration) ParseInt(key string) (*int, error) {
-	s := u.Settings[key]
-	if s == "" {
-		return nil, nil
-	}
-
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("error parsing key %q=%q", key, s)
-	}
-
-	return fi.Int(int(n)), nil
 }
 
 func (u *UserDataConfiguration) ParseCert(key string) (*fi.Certificate, error) {

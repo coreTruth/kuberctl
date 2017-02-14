@@ -40,12 +40,14 @@ const (
 	// But we use it in two ways: we update the docker manifest, and we install our own
 	// package (protokube, kubelet).  Maybe we should have the idea of a "system" package.
 	centosSystemdSystemPath = "/usr/lib/systemd/system"
+
+	coreosSystemdSystemPath = "/etc/systemd/system"
 )
 
 type Service struct {
 	Name       string
 	Definition *string
-	Running    *bool
+	Running    *bool `json:"running"`
 
 	// Enabled configures the service to start at boot (or not start at boot)
 	Enabled *bool
@@ -55,6 +57,7 @@ type Service struct {
 }
 
 var _ fi.HasDependencies = &Service{}
+var _ fi.HasName = &Service{}
 
 func (p *Service) GetDependencies(tasks map[string]fi.Task) []fi.Task {
 	var deps []fi.Task
@@ -91,6 +94,12 @@ func NewService(name string, contents string, meta string) (fi.Task, error) {
 		}
 	}
 
+	s.InitDefaults()
+
+	return s, nil
+}
+
+func (s *Service) InitDefaults() {
 	// Default some values to true: Running, SmartRestart, ManageState
 	if s.Running == nil {
 		s.Running = fi.Bool(true)
@@ -106,8 +115,6 @@ func NewService(name string, contents string, meta string) (fi.Task, error) {
 	if s.Enabled == nil {
 		s.Enabled = s.Running
 	}
-
-	return s, nil
 }
 
 func getSystemdStatus(name string) (map[string]string, error) {
@@ -137,6 +144,8 @@ func (e *Service) systemdSystemPath(target tags.HasTags) (string, error) {
 		return debianSystemdSystemPath, nil
 	} else if target.HasTag(tags.TagOSFamilyRHEL) {
 		return centosSystemdSystemPath, nil
+	} else if target.HasTag("_coreos") {
+		return coreosSystemdSystemPath, nil
 	} else {
 		return "", fmt.Errorf("unsupported systemd system")
 	}
@@ -373,4 +382,14 @@ func (_ *Service) RenderCloudInit(t *cloudinit.CloudInitTarget, a, e, changes *S
 	}
 
 	return nil
+}
+
+var _ fi.HasName = &Service{}
+
+func (f *Service) GetName() *string {
+	return &f.Name
+}
+
+func (f *Service) SetName(name string) {
+	glog.Fatalf("SetName not supported for Service task")
 }

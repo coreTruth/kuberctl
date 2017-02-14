@@ -16,17 +16,25 @@ limitations under the License.
 
 package local
 
-import "k8s.io/kops/upup/pkg/fi"
+import (
+	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kubernetes/pkg/util/sets"
+)
 
 type LocalTarget struct {
 	CacheDir string
-	Tags     map[string]struct{}
+	Tags     sets.String
 }
 
 var _ fi.Target = &LocalTarget{}
 
 func (t *LocalTarget) Finish(taskMap map[string]fi.Task) error {
 	return nil
+}
+
+func (t *LocalTarget) ProcessDeletions() bool {
+	// We don't expect any, but it would be our job to process them
+	return true
 }
 
 func (t *LocalTarget) HasTag(tag string) bool {

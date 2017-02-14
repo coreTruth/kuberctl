@@ -19,19 +19,25 @@ package kops
 import (
 	"fmt"
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
+const LabelClusterName = "kops.k8s.io/cluster"
+
 // InstanceGroup represents a group of instances (either nodes or masters) with the same configuration
 type InstanceGroup struct {
-	unversioned.TypeMeta `json:",inline"`
-	ObjectMeta    `json:"metadata,omitempty"`
+	v1.TypeMeta `json:",inline"`
+	ObjectMeta  api.ObjectMeta `json:"metadata,omitempty"`
 
 	Spec InstanceGroupSpec `json:"spec,omitempty"`
 }
 
 type InstanceGroupList struct {
+	v1.TypeMeta `json:",inline"`
+	v1.ListMeta `json:"metadata,omitempty"`
+
 	Items []InstanceGroup `json:"items"`
 }
 
@@ -39,34 +45,44 @@ type InstanceGroupList struct {
 type InstanceGroupRole string
 
 const (
-	InstanceGroupRoleMaster InstanceGroupRole = "Master"
-	InstanceGroupRoleNode   InstanceGroupRole = "Node"
+	InstanceGroupRoleMaster  InstanceGroupRole = "Master"
+	InstanceGroupRoleNode    InstanceGroupRole = "Node"
+	InstanceGroupRoleBastion InstanceGroupRole = "Bastion"
 )
+
+var AllInstanceGroupRoles = []InstanceGroupRole{
+	InstanceGroupRoleNode,
+	InstanceGroupRoleMaster,
+	InstanceGroupRoleBastion,
+}
 
 type InstanceGroupSpec struct {
 	// Type determines the role of instances in this group: masters or nodes
 	Role InstanceGroupRole `json:"role,omitempty"`
 
 	Image   string `json:"image,omitempty"`
-	MinSize *int   `json:"minSize,omitempty"`
-	MaxSize *int   `json:"maxSize,omitempty"`
+	MinSize *int32 `json:"minSize,omitempty"`
+	MaxSize *int32 `json:"maxSize,omitempty"`
 	//NodeInstancePrefix string `json:",omitempty"`
 	//NodeLabels         string `json:",omitempty"`
 	MachineType string `json:"machineType,omitempty"`
 	//NodeTag            string `json:",omitempty"`
 
 	// RootVolumeSize is the size of the EBS root volume to use, in GB
-	RootVolumeSize *int `json:"rootVolumeSize,omitempty"`
+	RootVolumeSize *int32 `json:"rootVolumeSize,omitempty"`
 	// RootVolumeType is the type of the EBS root volume to use (e.g. gp2)
 	RootVolumeType *string `json:"rootVolumeType,omitempty"`
 
-	Zones []string `json:"zones,omitempty"`
+	Subnets []string `json:"subnets,omitempty"`
 
 	// MaxPrice indicates this is a spot-pricing group, with the specified value as our max-price bid
 	MaxPrice *string `json:"maxPrice,omitempty"`
 
 	// AssociatePublicIP is true if we want instances to have a public IP
 	AssociatePublicIP *bool `json:"associatePublicIp,omitempty"`
+
+	// AdditionalSecurityGroups attaches additional security groups (e.g. i-123456)
+	AdditionalSecurityGroups []string `json:"additionalSecurityGroups,omitempty"`
 
 	// CloudLabels indicates the labels for instances in this group, at the AWS level
 	CloudLabels map[string]string `json:"cloudLabels,omitempty"`
@@ -79,18 +95,18 @@ type InstanceGroupSpec struct {
 func PerformAssignmentsInstanceGroups(groups []*InstanceGroup) error {
 	names := map[string]bool{}
 	for _, group := range groups {
-		names[group.Name] = true
+		names[group.ObjectMeta.Name] = true
 	}
 
 	for _, group := range groups {
 		// We want to give them a stable Name as soon as possible
-		if group.Name == "" {
+		if group.ObjectMeta.Name == "" {
 			// Loop to find the first unassigned name like `nodes-%d`
 			i := 0
 			for {
 				key := fmt.Sprintf("nodes-%d", i)
 				if !names[key] {
-					group.Name = key
+					group.ObjectMeta.Name = key
 					names[key] = true
 					break
 				}
@@ -108,6 +124,8 @@ func (g *InstanceGroup) IsMaster() bool {
 		return true
 	case InstanceGroupRoleNode:
 		return false
+	case InstanceGroupRoleBastion:
+		return false
 
 	default:
 		glog.Fatalf("Role not set in group %v", g)
@@ -116,7 +134,7 @@ func (g *InstanceGroup) IsMaster() bool {
 }
 
 func (g *InstanceGroup) Validate() error {
-	if g.Name == "" {
+	if g.ObjectMeta.Name == "" {
 		return field.Required(field.NewPath("Name"), "")
 	}
 
@@ -127,14 +145,15 @@ func (g *InstanceGroup) Validate() error {
 	switch g.Spec.Role {
 	case InstanceGroupRoleMaster:
 	case InstanceGroupRoleNode:
+	case InstanceGroupRoleBastion:
 
 	default:
 		return field.Invalid(field.NewPath("Role"), g.Spec.Role, "Unknown role")
 	}
 
 	if g.IsMaster() {
-		if len(g.Spec.Zones) == 0 {
-			return fmt.Errorf("Master InstanceGroup %s did not specify any Zones", g.Name)
+		if len(g.Spec.Subnets) == 0 {
+			return fmt.Errorf("Master InstanceGroup %s did not specify any Subnets", g.ObjectMeta.Name)
 		}
 	}
 
@@ -151,17 +170,18 @@ func (g *InstanceGroup) CrossValidate(cluster *Cluster, strict bool) error {
 
 	// Check that instance groups are defined in valid zones
 	{
-		clusterZones := make(map[string]*ClusterZoneSpec)
-		for _, z := range cluster.Spec.Zones {
-			if clusterZones[z.Name] != nil {
-				return fmt.Errorf("Zones contained a duplicate value: %v", z.Name)
+		clusterSubnets := make(map[string]*ClusterSubnetSpec)
+		for i := range cluster.Spec.Subnets {
+			s := &cluster.Spec.Subnets[i]
+			if clusterSubnets[s.Name] != nil {
+				return fmt.Errorf("Subnets contained a duplicate value: %v", s.Name)
 			}
-			clusterZones[z.Name] = z
+			clusterSubnets[s.Name] = s
 		}
 
-		for _, z := range g.Spec.Zones {
-			if clusterZones[z] == nil {
-				return fmt.Errorf("InstanceGroup %q is configured in %q, but this is not configured as a Zone in the cluster", g.Name, z)
+		for _, z := range g.Spec.Subnets {
+			if clusterSubnets[z] == nil {
+				return fmt.Errorf("InstanceGroup %q is configured in %q, but this is not configured as a Subnet in the cluster", g.ObjectMeta.Name, z)
 			}
 		}
 	}
